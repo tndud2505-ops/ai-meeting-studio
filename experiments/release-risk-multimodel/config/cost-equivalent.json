@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "regime": "cost",
+  "budget_unit": "inference_slot_proxy",
+  "slots_per_group": 3,
+  "scout_slots": 2,
+  "verifier_slots": 1,
+  "realized_token_tolerance_ratio": 0.10,
+  "warning": "Codex subscription runs expose tokens but not comparable dollar cost. This calibration is call-equivalent, not proven dollar-equivalent."
+}
+

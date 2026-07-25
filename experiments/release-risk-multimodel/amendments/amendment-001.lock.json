@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "source": "amendment-001.yaml",
+  "locked_at": "2026-07-22T13:10:00.000Z",
+  "sha256": "689f252c7f10dd1a2049885cd2ec3b7f861f5bd29f0dddc746de927f035e8b38",
+  "rule": "Amendments are append-only. Never overwrite a locked amendment."
+}
+

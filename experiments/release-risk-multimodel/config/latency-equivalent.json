@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "regime": "latency",
+  "wall_clock_limit_ms": 240000,
+  "scouts_B_C_parallel": true,
+  "A_sequential": true,
+  "timeout_is_missing_run": true
+}
+

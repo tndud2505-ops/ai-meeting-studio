@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "merge_verification_pipelines": {
+    "B": "fixed-codex-merge-verify-v1",
+    "C": "fixed-codex-merge-verify-v1"
+  },
+  "fixed-codex-merge-verify-v1": {
+    "engine": "codex",
+    "prompt": "config/prompts/verifier.md",
+    "candidate_sets": 2,
+    "candidate_order": "seeded_shuffle",
+    "output_schema": "config/finding.schema.json"
+  }
+}

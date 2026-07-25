@@ -1,0 +1,13 @@
+cases/public/*
+!cases/public/README.md
+cases/private/*
+!cases/private/README.md
+runs/*
+!runs/README.md
+judging/blinded/*
+!judging/blinded/README.md
+judging/private/*
+!judging/private/README.md
+analysis/generated/*
+!analysis/generated/README.md
+

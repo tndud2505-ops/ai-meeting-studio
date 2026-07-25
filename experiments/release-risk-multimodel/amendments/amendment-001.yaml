@@ -1,0 +1,19 @@
+schema_version: 1
+date: 2026-07-22
+stage: smoke_before_any_valid_group_result
+type: allowed_mechanical_cli_quoting_fix
+observed_failure: >-
+  On Windows, cmd forwarding preserved quote characters around the absolute Codex
+  --output-schema path. Codex exited with os error 123 before making a model request.
+change: >-
+  Copy the already locked, byte-identical finding.schema.json into each isolated call
+  directory and pass the relative filename finding.schema.json to Codex.
+unchanged:
+  - hypothesis
+  - case material
+  - group models and prompts
+  - budgets and latency
+  - finding and severity definitions
+  - metrics and elimination rule
+  - randomization and judging rules
+evidence_run: smoke-2026-07-22T12-16-08-086Z-45949776

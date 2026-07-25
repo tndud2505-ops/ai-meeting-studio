@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "source": "preregistration.yaml",
+  "locked_at": "2026-07-22T11:48:44.151Z",
+  "sha256": "3ad86f61f252a8186dc82a8c1bf5cc927b07319fc6f692d92dd32ac794bc9d65",
+  "rule": "Do not overwrite preregistration.yaml after lock. Add amendments/amendment-NNN.yaml and lock each amendment separately."
+}

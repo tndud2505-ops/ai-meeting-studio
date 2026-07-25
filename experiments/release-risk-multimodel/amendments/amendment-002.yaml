@@ -1,0 +1,23 @@
+schema_version: 1
+date: 2026-07-22
+stage: offline_harness_refactor_before_any_scorable_run
+type: measurement_interpretation_and_execution_priority_correction
+observed_issue: >-
+  Equal invocation counts do not establish equal cost. Codex subscription runs do not
+  expose a per-run cost field comparable with Claude's API-price estimate, and neither
+  field establishes incremental subscription spend.
+change:
+  cost_mode: calibration_only_until_comparable_unit_cost_exists
+  formal_equal_cost_conclusion_allowed: false
+  primary_executable_regime: equal_wall_clock_latency
+  equal_wall_clock_limit_seconds: 240
+  primary_comparison: C_versus_B
+  A_comparison_role: secondary_context_only
+unchanged:
+  - original preregistration bytes and SHA-256
+  - hypothesis that the formal primary comparison is C versus B
+  - group membership, models, prompts, and shared B/C merge-verification stage
+  - finding and severity definitions
+  - case inclusion, blinding, judging, missing-run, and elimination rules
+  - calibration cases remain excluded from product-validity claims
+

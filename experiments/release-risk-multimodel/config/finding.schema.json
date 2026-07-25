@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["release_decision", "findings", "review_summary"],
+  "properties": {
+    "release_decision": { "type": "string", "enum": ["block", "warn", "pass"] },
+    "review_summary": { "type": "string", "maxLength": 2000 },
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_id", "title", "severity", "mechanism", "trigger", "affected", "evidence", "validation", "release_action", "confidence"],
+        "properties": {
+          "finding_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$" },
+          "title": { "type": "string", "maxLength": 240 },
+          "severity": { "type": "string", "enum": ["Sev0", "Sev1", "Sev2", "Sev3"] },
+          "mechanism": { "type": "string", "maxLength": 1600 },
+          "trigger": { "type": "string", "maxLength": 1000 },
+          "affected": { "type": "string", "maxLength": 1000 },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ref", "detail"],
+              "properties": {
+                "ref": { "type": "string", "maxLength": 300 },
+                "detail": { "type": "string", "maxLength": 800 }
+              }
+            }
+          },
+          "validation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["method", "expected"],
+            "properties": {
+              "method": { "type": "string", "maxLength": 1000 },
+              "expected": { "type": "string", "maxLength": 800 }
+            }
+          },
+          "release_action": { "type": "string", "enum": ["block", "warn", "pass"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  }
+}
+

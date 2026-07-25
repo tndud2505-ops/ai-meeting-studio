@@ -1,0 +1,179 @@
+schema_version: 1
+registered_for: release-risk multimodel experiment
+calibration_cases_excluded_from_product_claim: true
+
+research_question: >-
+  At equal cost or equal wall-clock latency, does heterogeneous independent discovery
+  followed by fixed validation find more true Sev0/Sev1 release risks than isolated
+  same-model self-ensembling followed by the same validation, without increasing false
+  release blocks or human review burden?
+
+primary_hypothesis:
+  comparison: C versus B
+  claim: C has higher paired Sev0/Sev1 recall than B
+  required_noninferiority:
+    safe_version_false_block_rate_absolute_margin: 0.02
+    median_human_confirmation_time_relative_margin: 0.10
+    evidence_insufficient_intervention_rate_absolute_margin: 0.05
+
+groups:
+  A:
+    name: autonomous_single_model
+    model: gpt-5.6-sol
+    reasoning_effort: xhigh
+    process:
+      - discover in one context
+      - adversarially challenge in the same context
+      - validate and finalize in the same context
+  B:
+    name: same_model_self_ensemble
+    scouts:
+      - {model: gpt-5.6-sol, context: isolated}
+      - {model: gpt-5.6-sol, context: isolated}
+    merger_verifier: {model: gpt-5.6-sol, prompt: fixed, context: isolated}
+  C:
+    name: heterogeneous_ensemble
+    scouts:
+      - {model: gpt-5.6-sol, context: isolated}
+      - {model: claude-opus-4-8, context: isolated}
+    merger_verifier: {model: gpt-5.6-sol, prompt: identical_to_B, context: isolated}
+
+budgets:
+  equal_cost:
+    primary_operational_budget: three inference slots per group
+    scout_slots: 2
+    final_validation_slots: 1
+    realized_usage_reported: [input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, claude_estimated_usd]
+    dollar_equivalence_status: unavailable_until_codex_exposes_comparable_cost
+    acceptable_realized_token_deviation: 0.10
+  equal_latency:
+    wall_clock_limit_seconds: 240
+    scouts_B_C_run_in_parallel: true
+    A_turns_run_sequentially: true
+    timeout_result: missing_run_not_negative_finding
+
+tool_policy:
+  public_case_material: identical serialized files for all groups
+  participant_file_tools: disabled_for_claude; prohibited_and_audited_for_codex
+  network: prohibited
+  shell: prohibited
+  hidden_material: never serialized into prompts
+  tool_call_violation: invalidate run and retry once; second violation is missing run
+  deterministic_reproducers: evaluator_only
+  maximum_model_calls_per_group: 3
+
+finding_definition:
+  true_discovery_requires_all:
+    - specific failure mechanism
+    - concrete trigger condition
+    - affected object or user
+    - code/config/test/runtime evidence reference
+    - reproducible validation or monitoring method
+    - match to independently verified ground truth or human-confirmed new risk
+  duplicate: same mechanism, trigger, affected object, and remediation boundary
+  unsubstantiated_warning: lacks any required element or cannot be linked to evidence
+  false_block: recommends block on a safe variant without a confirmed Sev0/Sev1 risk
+
+severity:
+  Sev0: active or near-certain catastrophic loss, broad compromise, or unrecoverable corruption requiring immediate stop
+  Sev1: plausible release-triggered security breach, irreversible material data loss, major authorization failure, or critical workflow outage with no safe workaround
+  Sev2: material degradation or bounded outage with recovery/workaround
+  Sev3: localized defect, maintainability issue, or non-blocking polish
+
+metrics:
+  primary:
+    - paired Sev0/Sev1 recall
+    - safe-version false-block rate
+    - C-only true findings relative to B
+    - human confirmation minutes per case
+  secondary:
+    - confirmed finding precision
+    - cost per confirmed finding
+    - hypothesis-to-verification time
+    - duplicate count
+    - vague or unactionable alert count
+    - evidence-insufficient human intervention rate
+    - value-tradeoff human intervention rate
+  reporting:
+    - raw counts
+    - absolute paired differences
+    - 95 percent confidence intervals
+    - denominators
+    - missing runs
+    - no percentage-only claims
+
+elimination_rule:
+  required_for_keep:
+    recall_absolute_gain_C_over_B: 0.10
+    minimum_C_only_confirmed_Sev01_findings: 2
+    paired_recall_confidence_interval_lower_bound: greater_than_0
+    false_block_noninferiority: required
+    review_time_noninferiority: required
+    unacceptable_cost_increase: false
+  otherwise_conclusion: >-
+    Heterogeneous multimodel incremental value was not proven. Remove multimodel meetings
+    as the product center and retain the better single-model validation engine or
+    self-ensemble design.
+
+formal_case_gate:
+  minimum_case_pairs: 24
+  minimum_defect_cases_with_verified_Sev01: 18
+  minimum_safe_cases: 24
+  minimum_independent_repositories: 4
+  required_domains: [database_or_state_migration, auth_or_permission, payment_or_idempotency, infrastructure_or_configuration, critical_dependency_or_compatibility]
+  calibration_count: 6
+  calibration_scored_in_formal_result: false
+
+case_rules:
+  prefer: private real historical changes and confirmed incidents
+  injected_fault_allowed_only_if: executable reproduction or qualified engineer confirmation exists
+  exclude:
+    - ordinary syntax errors
+    - fabricated incidents
+    - unverifiable AI-generated faults
+    - cases seen in model training or public postmortems when avoidable
+    - cases with leaked fix commits or hidden-answer text in the public bundle
+
+randomization_and_blinding:
+  case_order: seeded random permutation per regime
+  group_order: seeded random permutation per case
+  public_case_ids: opaque
+  paired_relationships: private
+  blind_findings: strip model, group, run timing, CLI phrasing, and metadata; randomize finding order
+  reviewers: two qualified engineers independently
+  adjudication: third qualified engineer only for disagreements
+
+missing_data:
+  one_retry_for: [schema_parse_failure, transient_cli_failure, tool_call_violation]
+  missing_run: reported and excluded from available-case paired estimate; worst-case sensitivity also reported
+  model_failure: never counted as no-risk discovery
+  case_reproducer_failure: exclude case before formal run and document reason
+
+calibration_changes_allowed:
+  - CLI path and quoting fixes
+  - parser/schema compatibility
+  - timeout increases up to 50 percent
+  - deterministic seed plumbing
+  - log redaction
+  - mechanical prompt truncation applied identically
+  - concurrency reduction for host stability
+
+frozen_after_formal_start:
+  - hypothesis
+  - group membership and model identity
+  - prompts except typo-only amendments
+  - budgets and latency limit
+  - finding and severity definitions
+  - metrics and elimination thresholds
+  - case inclusion/exclusion rules
+  - randomization and human judging rules
+  - missing-run handling
+
+shadow_mode_gate:
+  requires_all:
+    - formal sample gate met
+    - blind human adjudication complete
+    - elimination rule passed
+    - explicit user approval for repository and CI changes
+  behavior: advisory only; never blocks release
+

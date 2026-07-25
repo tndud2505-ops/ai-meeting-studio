@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "network": "prohibited",
+  "participant_tools": "none",
+  "claude_enforcement": ["--safe-mode", "--tools", "", "--no-session-persistence"],
+  "codex_enforcement": ["--sandbox", "read-only", "--ignore-user-config", "--ignore-rules"],
+  "codex_audit": "Any command, file, web, MCP, or other tool event invalidates the attempt.",
+  "prompt_material": "Only serialized files from one public case directory.",
+  "evaluator_reproducers": "Allowed only after model output is sealed; private paths never enter prompts."
+}
+

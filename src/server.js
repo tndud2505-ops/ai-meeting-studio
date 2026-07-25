@@ -6,6 +6,8 @@ import { existsSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { Committee } from './orchestrator.js';
+import { makeProfile } from './profile.js';
+import { normalizeTemplateId, writebackTemplate, MEETING_TEMPLATE_IDS } from './capabilities.js';
 import { Workbench, loadWorkbenchFromDisk } from './workbench.js';
 import { loadTemplates } from './templates.js';
 import { resolveCliPath } from './resolve.js';
@@ -19,6 +21,7 @@ const STATIC = {
   '/i18n.js': ['public/i18n.js', 'text/javascript'],
   '/app-core.js': ['public/app-core.js', 'text/javascript'],
   '/app-committee.js': ['public/app-committee.js', 'text/javascript'],
+  '/handoff-clipboard.js': ['public/handoff-clipboard.js', 'text/javascript'],
   '/app-workbench.js': ['public/app-workbench.js', 'text/javascript'],
   '/app-sidebar.js': ['public/app-sidebar.js', 'text/javascript'],
   '/app-boot.js': ['public/app-boot.js', 'text/javascript'],
@@ -27,21 +30,70 @@ const STATIC = {
 let pickInFlight = false;
 let pickChild = null; // 当前原生对话框子进程；取消端点据此终结它并放开 pickInFlight
 
-// 顶置宿主窗口是必需的：服务以后台隐藏进程运行，它拉起的 GUI 拿不到前台焦点，
-// 对话框会藏到浏览器窗口后面——用户只看到按钮卡在「正在打开系统对话框…」（实测故障）。
-// 用一个 TopMost 的隐形 Form 作 owner 并 Activate，把对话框强制拉到最前。
+const HANDOFF_SHORTCUT_NAMES = Object.freeze({
+  claude: new Set(['claude.lnk', 'claude desktop.lnk']),
+  codex: new Set(['codex.lnk', 'openai codex.lnk']),
+});
+
+async function findHandoffShortcut(provider) {
+  if (process.platform !== 'win32' || !HANDOFF_SHORTCUT_NAMES[provider]) return null;
+  const roots = [
+    process.env.APPDATA ? path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs') : null,
+    process.env.PROGRAMDATA ? path.join(process.env.PROGRAMDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs') : null,
+  ].filter(Boolean);
+  const queue = roots.map(dir => ({ dir, depth: 0 }));
+  let inspected = 0;
+  while (queue.length && inspected < 5000) {
+    const current = queue.shift();
+    let entries = [];
+    try { entries = await readdir(current.dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      inspected++;
+      const full = path.join(current.dir, entry.name);
+      if (entry.isDirectory() && current.depth < 5) queue.push({ dir: full, depth: current.depth + 1 });
+      else if (entry.isFile() && HANDOFF_SHORTCUT_NAMES[provider].has(entry.name.toLowerCase())) return full;
+    }
+  }
+  return null;
+}
+
+async function handoffLaunchAvailability() {
+  const pairs = await Promise.all(['claude', 'codex'].map(async provider => {
+    const shortcut = await findHandoffShortcut(provider);
+    return [provider, { available: !!shortcut, reason: shortcut ? null : 'NO_SUPPORTED_DESKTOP_LAUNCH_TARGET' }];
+  }));
+  return Object.fromEntries(pairs);
+}
+
+async function launchHandoffDesktopApp(provider) {
+  const shortcut = await findHandoffShortcut(provider);
+  if (!shortcut) return false;
+  return new Promise(resolve => {
+    const child = spawn('explorer.exe', [shortcut], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.once('spawn', () => { child.unref(); resolve(true); });
+    child.once('error', () => resolve(false));
+  });
+}
+
+// 服务以后台隐藏进程运行，它拉起的 GUI 拿不到前台焦点，对话框会藏到浏览器窗口后面。
+// 曾用「TopMost 隐形 Form 当 owner」解决，但实测那样 ShowDialog 会在约 2.4 秒后无人操作
+// 自行返回 Cancel——用户还在翻目录对话框就消失了，只能再点一次「浏览」＝要选两次。
+// 现在改为不带 owner（对话框正常停留），另起一个 WinForms Timer：模态消息循环照常派发
+// 它的 Tick，等对话框窗口出现后把它置顶。窗口句柄必须用 FindWindowW 找——隐藏启动的
+// powershell 其 Process.MainWindowHandle 恒为 0（实测故障：定时器从未触发，对话框
+// visible 但压在浏览器后面）。类名必须显式写 '#32770'（Windows 标准对话框类）：
+// PowerShell 把 $null 字符串参数封送成空串而非 NULL 指针，FindWindowW($null,…) 永远找不到。
+// SetWindowPos TOPMOST 不需要前台权限，后台进程也必定生效；SetForegroundWindow 尽力而为
+//（Windows 前台锁可能拒绝，但置顶已保证用户看得见、点得到）。
 const WINDOWS_FOLDER_PICKER_SCRIPT = `$ErrorActionPreference = 'Stop'
-$owner = $null
+$shown = $false
 try {
   Add-Type -AssemblyName System.Windows.Forms | Out-Null
-  $owner = New-Object System.Windows.Forms.Form
-  $owner.TopMost = $true
-  $owner.ShowInTaskbar = $false
-  $owner.FormBorderStyle = 'None'
-  $owner.Opacity = 0
-  $owner.StartPosition = 'CenterScreen'
-  $owner.Show()
-  $owner.Activate()
+  Add-Type -Namespace RTWin -Name Api -MemberDefinition '
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+'
   $dlg = New-Object System.Windows.Forms.OpenFileDialog
   $dlg.Title = $env:RT_PICK_TITLE
   $dlg.ValidateNames = $false
@@ -49,17 +101,33 @@ try {
   $dlg.CheckPathExists = $true
   $dlg.FileName = $env:RT_PICK_PLACEHOLDER
   if ($env:RT_PICK_START -and (Test-Path -LiteralPath $env:RT_PICK_START)) { $dlg.InitialDirectory = $env:RT_PICK_START }
-  if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
-    $p = Split-Path -LiteralPath $dlg.FileName -Parent
-    if ($p) { Write-Output $p; exit 0 }
+  $script:fgDone = $false
+  $timer = New-Object System.Windows.Forms.Timer
+  $timer.Interval = 250
+  $timer.Add_Tick({
+    if ($script:fgDone) { return }
+    $h = [RTWin.Api]::FindWindowW('#32770', $env:RT_PICK_TITLE)
+    if ($h -ne [IntPtr]::Zero) {
+      $script:fgDone = $true
+      [RTWin.Api]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x0003) | Out-Null
+      [RTWin.Api]::SetForegroundWindow($h) | Out-Null
+    }
+  })
+  $timer.Start()
+  $result = $dlg.ShowDialog()
+  $timer.Stop()
+  $shown = $true
+  if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    $picked = [System.IO.Path]::GetDirectoryName($dlg.FileName)
+    if ($picked -and (Test-Path -LiteralPath $picked -PathType Container)) { Write-Output $picked; exit 0 }
   }
   exit 2
 } catch {
+  if ($shown) { exit 3 }
   try {
     $fb = New-Object System.Windows.Forms.FolderBrowserDialog
     if ($env:RT_PICK_START) { $fb.SelectedPath = $env:RT_PICK_START }
-    if ($owner) { $r = $fb.ShowDialog($owner) } else { $r = $fb.ShowDialog() }
-    if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $fb.SelectedPath; exit 0 }
+    if ($fb.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $fb.SelectedPath; exit 0 }
     exit 2
   } catch { exit 3 }
 }
@@ -133,7 +201,9 @@ export function deriveSessionAgents(agents, ids, workspace) {
   for (const id of new Set(ids)) {
     const a = structuredClone(agents[id]);
     if (workspace) {
-      a.cwd = workspace;
+      // contextRoot 不是 cwd 直传：调用层据此选 readonly-materials 策略并经 makeProfile
+      // 校验后才成为子进程工作目录（runner 忽略旧配置里的 cfg.cwd 字段）
+      a.contextRoot = workspace;
       if (a.workspaceArgs) a.command = [a.command[0], ...a.workspaceArgs];
     }
     out[id] = a;
@@ -150,12 +220,13 @@ export function deriveWriteAgents(agents, ids) {
     if (!a || a.unavailable || !a.writeArgs) continue;
     const c = structuredClone(a);
     c.command = [c.command[0], ...c.writeArgs];
+    if (c.writeOutput) c.output = c.writeOutput;
     out[id] = c;
   }
   return out;
 }
 
-export async function startServer({ port = 7777, agentsFile = 'adapters/agents.json', templatesDir = 'templates', sessionsDir = 'sessions' } = {}) {
+export async function startServer({ port = 7777, agentsFile = 'adapters/agents.json', templatesDir = 'templates', sessionsDir = 'sessions', capTemplatesFile = 'adapters/meeting-templates.json' } = {}) {
   // 「前端新后端旧」错配检测：前端文件按请求现读、后端代码进程启动时定格。
   // src/*.js 磁盘 mtime 晚于进程启动 → 下发 stale 标记，前端亮「重启生效」横幅。
   const serverStartedMs = Date.now();
@@ -184,6 +255,11 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
       try {
         if (a.disabled) throw new Error(a.disabled); // 手工禁用（已知运行时必失败的 agent，修好后删 disabled 字段即恢复）
         a.command[0] = resolveCliPath(a);
+        // 配置里的相对脚本路径在装载时冻结为绝对路径：子进程 cwd 由 profile 策略决定
+        //（scratch＝临时目录），不能再指望相对路径恰好从服务目录解析得到
+        a.command = a.command.map(arg =>
+          (typeof arg === 'string' && !arg.startsWith('-') && !path.isAbsolute(arg) && /[\\/]/.test(arg) && existsSync(arg))
+            ? path.resolve(arg) : arg);
         console.log(`[adapter] ${id} -> ${a.command[0]}`);
       } catch (e) {
         a.unavailable = String(e.message);
@@ -272,7 +348,12 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
       name: String(meta.topic ?? '').replace(/^\[工作台\] /, ''), agents: deriveSessionAgents(agents, participants, wbWorkspace),
       participants, baseDir: sessionsDir, emit: ev => entry.emit(ev), dir, messages,
       workspace: wbWorkspace, writeAgents: deriveWriteAgents(agents, participants), builds,
-      buildSessions: meta.buildSessions ?? {}, lang: meta.lang === 'en' ? 'en' : 'zh', perms: meta.perms ?? {},
+      buildSessions: meta.buildSessions ?? {}, execPackages: meta.execPackages ?? {},
+      currentExecutionPackageId: meta.currentExecutionPackageId ?? null,
+      copyLog: meta.copyLog ?? [], handoffInvalidations: meta.handoffInvalidations ?? [],
+      lang: meta.lang === 'en' ? 'en' : 'zh', perms: meta.perms ?? {},
+      caps: meta.caps ?? null, // 老会话无 caps → 默认 basic_strategy（兼容）
+      capFiles: { templatesFile: capTemplatesFile },
     });
     entry.bench = bench;
     // 合成事件回放：重建聊天记录（含动手 diff 卡片——patch 从会话目录读回）
@@ -286,7 +367,7 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           build = { buildId: rec.buildId, stat: rec.stat, status: rec.status, ...(rec.files ? { files: rec.files } : {}), patch };
         }
       }
-      entry.events.push({ type: 'chat-message', from: msg.from, name: msg.name, ...(msg.from === 'user' && msg.toNames ? { to: msg.toNames } : {}), data: msg.text, ...(msg.ctx ? { ctx: msg.ctx } : {}), ...(msg.meeting ? { meeting: msg.meeting } : {}), ...(build ? { build } : {}) });
+      entry.events.push({ type: 'chat-message', seq: msg.seq, from: msg.from, name: msg.name, ...(msg.from === 'user' && msg.toNames ? { to: msg.toNames } : {}), data: msg.text, ...(msg.ctx ? { ctx: msg.ctx } : {}), ...(msg.meeting ? { meeting: msg.meeting } : {}), ...(msg.attachments ? { attachments: msg.attachments } : {}), ...(build ? { build } : {}) });
     }
     entry.events.push({ type: 'state', data: 'idle' });
     const id = Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
@@ -302,7 +383,33 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
       b.lang === 'en'
         ? '[Verdict] From meeting "' + c.topic + '"\n\n' + card.trim()
         : '【会议裁决】来自会议「' + c.topic + '」\n\n' + card.trim(),
-      { meeting: { dir: path.basename(c.dir), topic: c.topic, kind: 'verdict' } },
+      { meeting: { dir: path.basename(c.dir), topic: c.topic, kind: 'verdict', role: 'judge', outputType: 'verdict', verdictVersion: c.verdictVersions.at(-1)?.version ?? 1, verdictState: c.verdictStatus ?? 'current' } },
+    );
+    return benchId;
+  };
+
+  // 辩手发言落回来源工作台：kind='statement'，收起态卡片（时间线保持紧凑，正文进对话上下文）
+  const postStatementToBench = async (c, targetDirname, ev) => {
+    const benchId = findActiveBenchId(targetDirname) ?? await resumeBenchFromDisk(targetDirname);
+    const b = benches.get(benchId).bench;
+    await b.note(
+      b.lang === 'en'
+        ? `[Meeting statement] Round ${ev.round} · ${ev.name} in "${c.topic}"\n\n` + String(ev.data ?? '').trim()
+        : `【会议发言】「${c.topic}」第 ${ev.round} 轮 · ${ev.name}\n\n` + String(ev.data ?? '').trim(),
+      { meeting: { dir: path.basename(c.dir), topic: c.topic, kind: 'statement', round: ev.round, speaker: ev.name, role: 'debater', outputType: 'statement' } },
+    );
+    return benchId;
+  };
+
+  // 轮次小结落回来源工作台：与裁决卡同一管道，kind='round'（前端渲染为可展开的进展卡）
+  const postRoundSummaryToBench = async (c, targetDirname, round, summaryText) => {
+    const benchId = findActiveBenchId(targetDirname) ?? await resumeBenchFromDisk(targetDirname);
+    const b = benches.get(benchId).bench;
+    await b.note(
+      b.lang === 'en'
+        ? `[Meeting update] Round ${round} summary from "${c.topic}"\n\n` + String(summaryText ?? '').trim()
+        : `【会议进展】「${c.topic}」第 ${round} 轮小结\n\n` + String(summaryText ?? '').trim(),
+      { meeting: { dir: path.basename(c.dir), topic: c.topic, kind: 'round', round, role: 'scribe', outputType: 'summary' } },
     );
     return benchId;
   };
@@ -316,6 +423,17 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
       if (ev.type === 'judge-card' && entry.committee?.origin) {
         postVerdictToBench(entry.committee, entry.committee.origin, ev.data)
           .catch(e => orig({ type: 'sys', data: (entry.committee.lang === 'en' ? 'Auto-post of the verdict to the source workbench failed: ' : '裁决卡自动落回来源工作台失败：') + String(e.message ?? e) }));
+      }
+      // 每轮书记小结同样落回：没走到裁决就回到对话时，会议内容也已在时间线里
+      //（既给用户看，也进对话上下文——此后在对话里让模型总结/引用会议内容才有据可依）
+      if (ev.type === 'summary' && entry.committee?.origin) {
+        postRoundSummaryToBench(entry.committee, entry.committee.origin, ev.round, ev.data)
+          .catch(e => orig({ type: 'sys', data: (entry.committee.lang === 'en' ? 'Auto-post of the round summary to the source workbench failed: ' : '轮次小结自动落回来源工作台失败：') + String(e.message ?? e) }));
+      }
+      // 辩手发言逐段落回：不等整轮完成——半轮弃会也不丢内容
+      if (ev.type === 'statement' && entry.committee?.origin) {
+        postStatementToBench(entry.committee, entry.committee.origin, ev)
+          .catch(e => orig({ type: 'sys', data: (entry.committee.lang === 'en' ? 'Auto-post of the statement to the source workbench failed: ' : '会议发言自动落回来源工作台失败：') + String(e.message ?? e) }));
       }
     };
     return entry;
@@ -501,7 +619,19 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           judgeFormat: t.judgeFormat,
           roleBriefs: t.roleBriefs,
         }]));
-        return json(res, 200, { agents: publicAgents(), templates: tpl, stale: await backendStale() });
+        // 会议模板（能力授权装配）：只下发安全元数据供选择器渲染
+        let capTemplates = {};
+        try {
+          const { loadCapabilityConfig } = await import('./capabilities.js');
+          const capCfg = loadCapabilityConfig({ templatesFile: capTemplatesFile });
+          capTemplates = Object.fromEntries(Object.entries(capCfg.templates).map(([tid, t]) => [tid, {
+            title: t.title, version: t.version,
+            enabled: (t.enabled ?? []).map(cid => ({ id: cid, name: capCfg.catalog[cid]?.name, summary: capCfg.catalog[cid]?.summary, risk: capCfg.catalog[cid]?.risk })),
+            recommendable: (t.recommendable ?? []).map(cid => ({ id: cid, name: capCfg.catalog[cid]?.name, summary: capCfg.catalog[cid]?.summary, risk: capCfg.catalog[cid]?.risk })),
+            permissions: t.permissions ?? {},
+          }]));
+        } catch { /* 模板文件损坏不阻塞 config——前端选择器降级隐藏 */ }
+        return json(res, 200, { agents: publicAgents(), templates: tpl, capTemplates, stale: await backendStale() });
       }
       if (url.pathname === '/api/sessions' && req.method === 'GET') {
         const activeDirs = new Set([
@@ -548,7 +678,10 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
         try {
           // 超时沿用该 adapter 自己声明的 timeoutMs：慢引擎（如 OpenClaw 正常要 ~3 分钟）
           // 用统一的短上限会被误判 timeout——健康检查不能比引擎的已知特性更急躁
-          const r = await runAgent(structuredClone(a), 'Health check. Reply with the single word: ok');
+          const r = await runAgent(structuredClone(a), 'Health check. Reply with the single word: ok', {
+            profile: makeProfile({ id: `health:${id}`, role: 'health-check', cwdPolicy: 'scratch' }),
+            manifestFile: path.join(sessionsDir, '_health', `${id}.context_manifest.json`),
+          });
           smokeStatus[id] = { ok: r.ok, ...(r.ok ? {} : { error: r.error }), durationMs: r.durationMs, ts: new Date().toISOString() };
           return json(res, 200, smokeStatus[id]);
         } finally { smokeInflight.delete(id); }
@@ -614,6 +747,9 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           roles: body.roles, template, mode: body.mode ?? 'manual', workspace, origin: sessionOrigin,
           maxRounds: Math.min(Math.max(Number(body.maxRounds) || 4, 1), 10),
           baseDir: sessionsDir, lang,
+          // 会议模板显式选择；capGrants 只用于升格继承来源工作台的本场授权（compileCaps 会按模板过滤）
+          caps: { templateId: normalizeTemplateId(String(body.capTemplate ?? '')), grants: Array.isArray(body.capGrants) ? body.capGrants.map(String) : [] },
+          capFiles: { templatesFile: capTemplatesFile },
           emit: ev => entry.emit(ev),
         });
         committee.workspace = workspace;
@@ -694,8 +830,12 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
             mode: meta.mode, maxRounds: meta.maxRounds, baseDir: sessionsDir,
             dir, round: rounds, history, origin: String(meta.origin ?? ''),
             lang: meta.lang === 'en' ? 'en' : 'zh',
+            workspace: String(meta.workspace ?? ''), // 挂载信息随恢复带回，防 saveMeta 抹掉
+            caps: meta.caps ?? null,
+            capFiles: { templatesFile: capTemplatesFile },
             emit: ev => entry.emit(ev),
           });
+          committee.restoreCrossoverState(meta); // 跨界事件/裁决版本/过期标记随恢复带回
           entry.committee = committee;
           attachAutoVerdictFlow(entry); // 恢复后再出的新裁决同样自动落回（回放走 events.push 不经 emit，不误触）
           await committee.saveMeta('paused');
@@ -764,6 +904,9 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           participants, baseDir: sessionsDir, emit: ev => entry.emit(ev),
           workspace: wbWorkspace, writeAgents: deriveWriteAgents(agents, participants),
           lang: wbLang,
+          // 会议模板只认用户显式选择；未选＝通用入口默认 basic_strategy（normalizeTemplateId 兜底）
+          caps: { templateId: normalizeTemplateId(String(body.capTemplate ?? '')) },
+          capFiles: { templatesFile: capTemplatesFile },
         });
         await bench.init();
         // 建台时的角色分配（能力+仲裁叠加）：逐个校验，无效项按默认角色处理不阻塞建台
@@ -802,18 +945,83 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           return json(res, 200, { ok: true });
         } catch (e) { return json(res, 400, { error: String(e.message ?? e) }); }
       }
+
+      const handoffSummarize = url.pathname.match(/^\/api\/workbenches\/([a-z0-9]+)\/exec-package\/summarize$/);
+      if (handoffSummarize && req.method === 'POST') {
+        const entry = benches.get(handoffSummarize[1]);
+        if (!entry) return json(res, 404, { error: '工作台不存在' });
+        if (entry.bench.state === 'busy') return json(res, 409, { error: '上一条消息还在处理中' });
+        try {
+          const body = await readBody(req);
+          const result = await entry.bench.summarizeForHandoff({ agentId: body.agentId });
+          return json(res, 200, result);
+        } catch (error) { return json(res, 400, { error: String(error.message ?? error) }); }
+      }
+
+      const execPackage = url.pathname.match(/^\/api\/workbenches\/([a-z0-9]+)\/exec-package$/);
+      if (execPackage && req.method === 'POST') {
+        const entry = benches.get(execPackage[1]);
+        if (!entry) return json(res, 404, { error: '工作台不存在' });
+        try {
+          const body = await readBody(req);
+          const pkg = await entry.bench.draftExecutionPackage(body);
+          return json(res, 200, { pkg });
+        } catch (error) { return json(res, 400, { error: String(error.message ?? error) }); }
+      }
+
+      const execConfirm = url.pathname.match(/^\/api\/workbenches\/([a-z0-9]+)\/exec-package\/confirm$/);
+      if (execConfirm && req.method === 'POST') {
+        const entry = benches.get(execConfirm[1]);
+        if (!entry) return json(res, 404, { error: '工作台不存在' });
+        const body = await readBody(req);
+        try {
+          const pkg = await entry.bench.confirmExecutionPackage(String(body.pkgId ?? body.executionPackageId ?? ''), new Date().toISOString());
+          return json(res, 200, { pkg });
+        } catch (error) { return json(res, 400, { error: String(error.message ?? error) }); }
+      }
+
+      const handoffCopyLog = url.pathname.match(/^\/api\/workbenches\/([a-z0-9]+)\/handoff-copy-log$/);
+      if (handoffCopyLog && req.method === 'POST') {
+        const entry = benches.get(handoffCopyLog[1]);
+        if (!entry) return json(res, 404, { error: '工作台不存在' });
+        const body = await readBody(req);
+        try {
+          const copyRecord = await entry.bench.recordHandoffCopy(body);
+          return json(res, 200, { copyRecord });
+        } catch (error) { return json(res, 400, { error: String(error.message ?? error) }); }
+      }
+
+      const handoffLaunch = url.pathname.match(/^\/api\/workbenches\/([a-z0-9]+)\/handoff-launch$/);
+      if (handoffLaunch && req.method === 'POST') {
+        if (!benches.has(handoffLaunch[1])) return json(res, 404, { error: '工作台不存在' });
+        const body = await readBody(req);
+        const provider = String(body.provider ?? '');
+        if (!['claude', 'codex'].includes(provider)) return json(res, 400, { error: 'HANDOFF_PROVIDER_INVALID' });
+        try {
+          const launched = await launchHandoffDesktopApp(provider);
+          return json(res, launched ? 200 : 409, launched
+            ? { launched: true }
+            : { launched: false, error: 'NO_SUPPORTED_DESKTOP_LAUNCH_TARGET' });
+        } catch (error) { return json(res, 500, { launched: false, error: String(error.message ?? error) }); }
+      }
+
       const wb = url.pathname.match(/^\/api\/workbenches\/([a-z0-9]+)(\/([a-z-]+))?$/);
       if (wb) {
         const entry = benches.get(wb[1]);
         if (!entry) return json(res, 404, { error: '工作台不存在' });
         const b = entry.bench, action = wb[3];
-        if (!action && req.method === 'GET')
+        if (!action && req.method === 'GET') {
+          const launchAvailability = await handoffLaunchAvailability();
           return json(res, 200, {
             name: b.name, state: b.state, participants: b.participants,
             agentNames: Object.fromEntries(b.participants.map(id => [id, b.nameOf(id)])),
             workspace: b.workspace, writeCapable: Object.keys(b.writeAgents),
             roles: Object.fromEntries(b.participants.map(id => [id, b.roleOf(id)])),
+            handoff: b.handoffSummary(),
+            launchAvailability,
+            caps: b.capsSummary(), // 当前模板与能力（安全元数据）
           });
+        }
         if (!action && req.method === 'DELETE') {
           for (const client of entry.clients) { try { client.end(); } catch { /* 已断开 */ } }
           benches.delete(wb[1]);
@@ -834,13 +1042,54 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
         if (action === 'conflicts' && req.method === 'GET')
           return json(res, 200, b.conflictSheet());
         if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
+        // 上传附件：原始字节流（不能走 readBody 的 JSON 解析）。文件名经 x-rt-filename 头传入，
+        // 只取基名并过扩展名白名单；落到会话目录 uploads/ 下，返回描述符供 message 引用。
+        if (action === 'upload') {
+          const rawName = (() => { try { return decodeURIComponent(String(req.headers['x-rt-filename'] ?? '')); } catch { return ''; } })();
+          const base = path.basename(rawName).replace(/[<>:"/\\|?* -]/g, '_').slice(-120);
+          const ext = path.extname(base).toLowerCase().slice(1);
+          const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+          const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'log', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'sh', 'ps1', 'bat', 'yaml', 'yml', 'toml', 'xml', 'html', 'css', 'sql', 'diff', 'patch', 'ini', 'cfg', 'conf', 'env', 'tex']);
+          if (!base || !ext) return json(res, 400, { error: b.lang === 'en' ? 'Missing or invalid file name' : '文件名缺失或无效' });
+          const kind = IMAGE_EXT.has(ext) ? 'image' : (TEXT_EXT.has(ext) ? 'text' : null);
+          if (!kind) return json(res, 400, { error: b.lang === 'en' ? `Unsupported file type: .${ext} (images and text files only for now)` : `暂不支持的文件类型：.${ext}（目前支持图片与文本类文件）` });
+          const MAX_UPLOAD = 20 * 1024 * 1024;
+          const chunks = [];
+          let size = 0, overflow = false;
+          await new Promise(resolve => {
+            req.on('data', d => {
+              size += d.length;
+              if (size > MAX_UPLOAD) { overflow = true; req.destroy(); resolve(); return; }
+              chunks.push(d);
+            });
+            req.on('end', resolve);
+            req.on('error', resolve);
+          });
+          if (overflow) return json(res, 400, { error: b.lang === 'en' ? 'File too large (max 20MB)' : '文件太大（上限 20MB）' });
+          if (!size) return json(res, 400, { error: b.lang === 'en' ? 'Empty file' : '空文件' });
+          const uploadsDir = path.join(b.dir, 'uploads');
+          await mkdir(uploadsDir, { recursive: true });
+          const stored = `${Date.now().toString(36)}-${base}`;
+          await writeFile(path.join(uploadsDir, stored), Buffer.concat(chunks));
+          return json(res, 200, { file: stored, name: base, kind, size });
+        }
         const body = await readBody(req);
         if (action === 'message') {
           const text = String(body.text ?? '').trim();
-          if (!text) return json(res, 400, { error: '内容不能为空' });
+          // 附件校验：只认 upload 返回的存储名（纯基名，杜绝路径穿越），且文件必须真实存在
+          const atts = [];
+          for (const a of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8)) {
+            const stored = String(a?.file ?? '');
+            if (!stored || stored !== path.basename(stored)) continue;
+            const abs = path.join(b.dir, 'uploads', stored);
+            if (!existsSync(abs)) continue;
+            const ext = path.extname(stored).toLowerCase().slice(1);
+            atts.push({ name: String(a.name ?? stored), kind: ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext) ? 'image' : 'text', size: Number(a.size ?? 0), file: abs });
+          }
+          if (!text && !atts.length) return json(res, 400, { error: '内容不能为空' });
           if (b.state === 'busy') return json(res, 409, { error: '上一条消息还在处理中' });
           const to = (Array.isArray(body.to) ? body.to : []).filter(x => b.participants.includes(x));
-          b.message(text, to).catch(e => entry.emit({ type: 'error', data: String(e.message ?? e) }));
+          b.message(text, to, atts).catch(e => entry.emit({ type: 'error', data: String(e.message ?? e) }));
           return json(res, 200, { ok: true });
         }
         if (action === 'build') {
@@ -848,14 +1097,20 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           const agentId = String(body.agentId ?? '');
           if (!text) return json(res, 400, { error: '任务不能为空' });
           if (b.state === 'busy') return json(res, 409, { error: '上一条消息还在处理中' });
-          if (!b.writeAgents[agentId]) return json(res, 400, { error: '该模型不支持动手' });
+          if (!b.writeAgents[agentId]) {
+            // 越权任务不执行：只落一条独立授权请求记录（进 manifest 的 deniedOrBlocked），
+            // 聊天/任务文本永远不能静默扩权——授权走能力/权限装配流程
+            b.capState.deniedLog.push({ kind: 'authorization_request', request: 'write', agentId, at: new Date().toISOString(), status: 'pending-user-authorization' });
+            await b.saveMeta();
+            return json(res, 400, { error: '该模型不支持动手（已记录为待授权请求——写权限须在配置中显式开启）' });
+          }
           b.build(text, agentId).catch(e => entry.emit({ type: 'error', data: String(e.message ?? e) }));
           return json(res, 200, { ok: true });
         }
         if (action === 'relay') {
           if (b.state === 'busy') return json(res, 409, { error: '上一条消息还在处理中' });
           const order = (Array.isArray(body.order) ? body.order : []).filter(x => b.participants.includes(x));
-          b.relay(body.rounds, order).catch(e => entry.emit({ type: 'error', data: String(e.message ?? e) }));
+          b.relay(body.rounds, order, String(body.seed ?? '')).catch(e => entry.emit({ type: 'error', data: String(e.message ?? e) }));
           return json(res, 200, { ok: true });
         }
         if (action === 'conflict-discuss') {
@@ -874,6 +1129,42 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           return json(res, 200, { ok: true });
         }
         if (action === 'stop') { b.stop(); return json(res, 200, { ok: true }); }
+        if (action === 'crossover') {
+          // 聊天→会议显式交接：只认结构化字段（seq+枚举类型），host 绝不从文本推断相关性。
+          // 目标会议＝以本台为 origin 的进行中会议；没有就明确报错，不做任何静默同步。
+          const seq = Number(body.seq);
+          const msg = b.messages.find(x => x.seq === seq);
+          if (!msg) return json(res, 400, { error: b.lang === 'en' ? 'No such message' : '消息不存在' });
+          const benchDirname = path.basename(b.dir);
+          const target = [...sessions.values()].find(e => e.committee?.origin === benchDirname);
+          if (!target) return json(res, 400, { error: b.lang === 'en' ? 'No meeting originated from this workbench is open' : '没有从本工作台发起且仍开着的会议' });
+          try {
+            const ev = await target.committee.addCrossover({ type: String(body.type ?? ''), text: msg.text, sourceSeq: seq, sourceBench: benchDirname });
+            b.emit({ type: 'sys', data: b.lang === 'en' ? `Sent to meeting "${target.committee.topic}" as ${ev.type} — pending your approval at the round boundary` : `已发送到会议「${target.committee.topic}」（${ev.type}）——待你在轮末批准后进入下一阶段` });
+            return json(res, 200, { ok: true, eventId: ev.id, meetingTopic: target.committee.topic });
+          } catch (e) { return json(res, 400, { error: String(e.message ?? e) }); }
+        }
+        if (action === 'capabilities') {
+          // 能力授权（v1）：host 只做确定性动作——授权/拒绝/切模板/写回，全部由用户显式触发
+          const capAction = String(body.op ?? '');
+          const capId = String(body.id ?? '');
+          try {
+            if (capAction === 'grant') { await b.grantCapability(capId); return json(res, 200, { ok: true, caps: b.capsSummary() }); }
+            if (capAction === 'deny') { await b.denyCapability(capId); return json(res, 200, { ok: true, caps: b.capsSummary() }); }
+            if (capAction === 'set-template') {
+              await b.setCapTemplate(normalizeTemplateId(String(body.templateId ?? '')));
+              return json(res, 200, { ok: true, caps: b.capsSummary() });
+            }
+            if (capAction === 'writeback') {
+              // 模板写回＝独立于本场授权的第二次确认；产生版本化记录
+              const record = writebackTemplate({ templatesFile: capTemplatesFile, templateId: b.caps.templateId, capId, reason: String(body.reason ?? ''), phase: 'discussion' });
+              await b.reloadCaps();
+              b.emit({ type: 'sys', data: b.lang === 'en' ? `Capability ${capId} written back to template ${b.caps.templateId} (v${record.templateVersion.from} → v${record.templateVersion.to})` : `能力 ${capId} 已写回模板 ${b.caps.templateId}（v${record.templateVersion.from} → v${record.templateVersion.to}）` });
+              return json(res, 200, { ok: true, record, caps: b.capsSummary() });
+            }
+            return json(res, 400, { error: 'unknown capabilities op: ' + capAction });
+          } catch (e) { return json(res, 400, { error: String(e.message ?? e) }); }
+        }
         if (action === 'workspace') {
           const workspacePath = normalizeFsPath(body.path);
           const workspaceError = workspacePathError(workspacePath, b.lang === 'en' ? 'en' : 'zh');
@@ -927,7 +1218,8 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
         if (action === 'promote') {
           // 升格：对话史打包成会议草稿，走既有 #draft 预填链路；携带来源目录名供裁决卡回流
           const id = Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
-          drafts.set(id, { topic: String(body.topic ?? '') || (b.lang === 'en' ? 'Workbench topic: ' + (b.name || 'unnamed') : '工作台议题：' + (b.name || '未命名')), materials: b.promoteMaterials(), template: 'general', workspace: '', originBench: path.basename(b.dir), lang: b.lang });
+          // 升格继承工作台的能力授权：会议与工作台共用同一份授权清单（模板+本场授权）
+          drafts.set(id, { topic: String(body.topic ?? '') || (b.lang === 'en' ? 'Workbench topic: ' + (b.name || 'unnamed') : '工作台议题：' + (b.name || '未命名')), materials: b.promoteMaterials(), template: 'general', workspace: '', originBench: path.basename(b.dir), lang: b.lang, capTemplate: b.capState.templateId, capGrants: b.capState.grants });
           while (drafts.size > 20) drafts.delete(drafts.keys().next().value);
           return json(res, 200, { id });
         }
@@ -950,6 +1242,7 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           return json(res, 200, {
             state: c.state, round: c.round, topic: c.topic, dir: c.dir, materials: c.materials, origin: c.origin,
             roles: c.roles, agentNames: Object.fromEntries(Object.entries(c.agents).map(([id, a]) => [id, a.name])),
+            crossover: c.crossoverSummary(), verdictVersions: c.verdictVersions, // 跨界队列+裁决版本表
           });
         // events 是 GET 语义（SSE），必须先放行，再统一做 POST 检查
         if (action === 'events' && req.method === 'GET') {
@@ -975,6 +1268,12 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
             return fire(() => c.runAuto());
           }
           case 'judge': return fire(() => c.runJudge());
+          case 'rejudge': return fire(() => c.rejudge()); // 全体重审：新裁决版本，历史归档
+          case 'crossover-resolve': {
+            // 待纳入事件的批准/拒绝——只认结构化字段，且只在轮末（非 running）可操作
+            try { return json(res, 200, { ok: true, event: await c.resolveCrossover(String(body.id ?? ''), body.approve !== false), crossover: c.crossoverSummary() }); }
+            catch (e) { return json(res, 400, { error: String(e.message ?? e) }); }
+          }
           case 'retry': return fire(() => c.retrySide(body.agentId));
           case 'skip': return fire(() => c.skipSide(body.agentId));
           case 'interject': c.interject(String(body.text ?? '')); return json(res, 200, { ok: true });

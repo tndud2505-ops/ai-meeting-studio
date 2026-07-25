@@ -8,6 +8,251 @@ let wbLastSpeaker = null; // 隐式路由目标（前端镜像：跟随 chat-mes
 let wbConflictRefreshTimer = null;
 const wbConflictDiscussTimers = new Map(); // path -> 5 秒兜底恢复 timer
 
+// Execution handoff panel. It previews the current conclusion and copies only after a visible user action.
+const wbHandoffUi = (() => {
+  const state = {
+    launchAvailability: {},
+    previewText: '',
+    hasGenerated: false,
+    busy: null,
+    copyHadError: false,
+    lastCopySuccess: false,
+    feedback: { handoff: null, launch: null },
+  };
+
+  const motionBehavior = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+  const setFeedback = (slot, kind, text) => { state.feedback[slot] = { kind, text }; };
+
+  function panelState() {
+    if (state.busy === 'copy') return 'copying';
+    if (state.busy === 'generate') return 'generating';
+    if (state.lastCopySuccess) return 'success';
+    if (Object.values(state.feedback).some(entry => entry?.kind === 'error')) return 'error';
+    if (state.copyHadError) return 'error';
+    if (state.hasGenerated && state.previewText.trim()) return 'ready';
+    return 'empty';
+  }
+
+  async function postJson(pathname, body) {
+    let response;
+    try {
+      response = await fetch(`/api/workbenches/${wbId}/${pathname}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+    } catch (error) {
+      throw new Error(t('handoff.networkError', { msg: error.message }));
+    }
+    let data = {};
+    try { data = await response.json(); } catch { data = {}; }
+    return { ...data, httpStatus: response.status, httpOk: response.ok };
+  }
+
+  const responseError = result => result.error || t('handoff.requestFailed', { code: result.httpStatus });
+
+  function renderFeedback(selector, entry, fallback = '') {
+    const element = $(selector);
+    if (!element) return;
+    element.textContent = entry?.text ?? fallback;
+    if (entry?.kind) element.dataset.state = entry.kind;
+    else delete element.dataset.state;
+  }
+
+  function setButton(button, id, disabled = false, disabledReason = '') {
+    const loading = state.busy === id;
+    button.disabled = loading || disabled || (!!state.busy && !loading);
+    button.setAttribute('aria-busy', loading ? 'true' : 'false');
+    button.dataset.state = loading ? 'loading' : (state.copyHadError && id === 'copy' ? 'error' : 'default');
+    button.title = button.disabled && !loading ? (disabledReason || t('handoff.waitForAction')) : '';
+  }
+
+  function renderLaunch() {
+    $('#handoffLaunchClaude').parentElement.setAttribute('aria-label', t('handoff.launchGroup'));
+    for (const provider of ['claude', 'codex']) {
+      const button = $(`#handoffLaunch${provider === 'claude' ? 'Claude' : 'Codex'}`);
+      const available = state.launchAvailability?.[provider]?.available === true;
+      setButton(button, `launch-${provider}`, !available, t('handoff.launchUnavailable'));
+    }
+    renderFeedback('#handoffLaunchFeedback', state.feedback.launch,
+      ['claude', 'codex'].some(provider => state.launchAvailability?.[provider]?.available)
+        ? '' : t('handoff.launchUnavailable'));
+  }
+
+  function renderHandoff() {
+    const generating = state.busy === 'generate';
+    const generate = $('#handoffGenerate');
+    generate.textContent = t(generating ? 'handoff.summarizing' : 'handoff.generate');
+    generate.setAttribute('aria-busy', generating ? 'true' : 'false');
+    setButton(generate, 'generate');
+    $('#handoffPreviewBlock').hidden = !state.hasGenerated;
+    $('#handoffPreview').textContent = state.previewText;
+    const copy = $('#handoffCopy');
+    copy.textContent = t(state.busy === 'copy' ? 'handoff.copying'
+      : state.copyHadError ? 'handoff.copyRetry'
+      : state.lastCopySuccess ? 'handoff.copyAgain' : 'handoff.copy');
+    const emptyReason = state.previewText.trim() ? '' : t('handoff.quickEmpty');
+    setButton(copy, 'copy', !state.hasGenerated || !!emptyReason, emptyReason);
+    renderFeedback('#handoffFeedback', state.feedback.handoff);
+  }
+
+  function render() {
+    if (!$('#handoffPanel')) return;
+    $('#handoffPanel').dataset.state = panelState();
+    renderHandoff();
+    renderLaunch();
+  }
+
+  async function handleGenerate() {
+    if (state.busy) return;
+    state.busy = 'generate';
+    state.copyHadError = false;
+    state.lastCopySuccess = false;
+    setFeedback('handoff', 'loading', t('handoff.summarizing'));
+    render();
+    try {
+      const result = await postJson('exec-package/summarize', {});
+      if (!result.httpOk || typeof result.text !== 'string') throw new Error(responseError(result));
+      state.previewText = String(result.text ?? '');
+      state.hasGenerated = true;
+      const time = new Date().toLocaleTimeString(LANG === 'en' ? 'en-US' : 'zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      setFeedback('handoff', state.previewText.trim() ? 'success' : 'warning',
+        state.previewText.trim() ? t('handoff.summarizedBy', { name: result.name || '', time }) : t('handoff.quickEmpty'));
+    } catch (error) {
+      setFeedback('handoff', 'error', t('handoff.previewFailed', { msg: error.message }));
+    } finally {
+      state.busy = null;
+      render();
+      if (state.previewText.trim()) $('#handoffPreview').focus({ preventScroll: true });
+    }
+  }
+
+  async function recordCopy(details) {
+    const result = await postJson('handoff-copy-log', {
+      taskId: details.fullTextSha256,
+      fullTextSha256: details.fullTextSha256,
+      fullTextBytes: details.fullTextBytes,
+      copiedAt: details.copiedAt,
+      writeOk: details.writeOk === true,
+      readbackOk: details.readbackOk === true,
+    });
+    if (!result.httpOk || !result.copyRecord) throw new Error(responseError(result));
+    return result.copyRecord;
+  }
+
+  function clipboardErrorText(error) {
+    if (error.stage === 'write') return t('handoff.writeFailed');
+    if (error.stage === 'read') return t('handoff.readFailed');
+    if (error.stage === 'mismatch') return t('handoff.mismatch');
+    return t('handoff.clipboardUnavailable');
+  }
+
+
+  async function handleCopy() {
+    if (state.busy || !state.hasGenerated || !state.previewText.trim()) return;
+    if (!window.RTHandoffClipboard) {
+      state.copyHadError = true;
+      setFeedback('handoff', 'error', t('handoff.quickUnavailable'));
+      return render();
+    }
+    state.busy = 'copy';
+    state.copyHadError = false;
+    state.lastCopySuccess = false;
+    setFeedback('handoff', 'loading', t('handoff.copying'));
+    render();
+    let clipboardVerified = false;
+    try {
+      const fullText = state.previewText;
+      const fullTextBytes = window.RTHandoffClipboard.utf8Bytes(fullText);
+      const fullTextSha256 = await window.RTHandoffClipboard.sha256Hex(fullText);
+      const pkg = { fullText, fullTextBytes, fullTextSha256, userConfirmedAt: new Date().toISOString() };
+      const proof = await window.RTHandoffClipboard.copyConfirmedText(pkg);
+      clipboardVerified = true;
+      const copiedAt = new Date().toISOString();
+      await recordCopy({ ...pkg, ...proof, copiedAt });
+      const time = new Date(copiedAt).toLocaleTimeString(LANG === 'en' ? 'en-US' : 'zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      state.lastCopySuccess = true;
+      setFeedback('handoff', 'success', t('handoff.quickCopied', { time }));
+    } catch (error) {
+      state.copyHadError = true;
+      setFeedback('handoff', 'error', clipboardVerified
+        ? t('handoff.copyLogFailed', { msg: error.message })
+        : clipboardErrorText(error));
+    } finally {
+      state.busy = null;
+      render();
+    }
+  }
+
+  async function handleLaunch(provider) {
+    if (!state.launchAvailability?.[provider]?.available) return;
+    state.busy = `launch-${provider}`;
+    setFeedback('launch', 'loading', t('handoff.launching', { provider }));
+    render();
+    try {
+      const result = await postJson('handoff-launch', { provider });
+      if (!result.httpOk || !result.launched) throw new Error(responseError(result));
+      setFeedback('launch', 'success', t('handoff.launched', { provider }));
+    } catch (error) {
+      setFeedback('launch', 'error', t('handoff.launchFailed', { provider, msg: error.message }));
+    } finally {
+      state.busy = null;
+      render();
+    }
+  }
+
+  function update(_summary, launchAvailability = null) {
+    if (launchAvailability) state.launchAvailability = launchAvailability;
+    render();
+  }
+
+  function attach(_summary, launchAvailability = {}) {
+    state.launchAvailability = launchAvailability ?? {};
+    state.previewText = '';
+    state.hasGenerated = false;
+    state.busy = null;
+    state.copyHadError = false;
+    state.lastCopySuccess = false;
+    state.feedback = { handoff: null, launch: null };
+    $('#handoffBody').hidden = true;
+    $('#handoffToggle').setAttribute('aria-expanded', 'false');
+    $('.handoff-toggle-mark').textContent = '+';
+    render();
+  }
+
+  async function reveal(focusSelector = '#handoffToggle') {
+    $('#handoffBody').hidden = false;
+    $('#handoffToggle').setAttribute('aria-expanded', 'true');
+    $('.handoff-toggle-mark').textContent = '-';
+    $('#handoffPanel').scrollIntoView({ block: 'start', behavior: motionBehavior() });
+    $(focusSelector)?.focus({ preventScroll: true });
+    await handleGenerate();
+  }
+
+  function bind() {
+    $('#handoffToggle').onclick = async () => {
+      const body = $('#handoffBody');
+      body.hidden = !body.hidden;
+      $('#handoffToggle').setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
+      $('.handoff-toggle-mark').textContent = body.hidden ? '+' : '-';
+      if (!body.hidden) await handleGenerate();
+    };
+    $('#wbDispatchPointer').onclick = () => reveal();
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !$('#handoffBody').hidden && !$('#workbench').hidden) {
+        $('#handoffBody').hidden = true;
+        $('#handoffToggle').setAttribute('aria-expanded', 'false');
+        $('.handoff-toggle-mark').textContent = '+';
+        $('#handoffToggle').focus();
+      }
+    });
+    $('#handoffGenerate').onclick = handleGenerate;
+    $('#handoffCopy').onclick = handleCopy;
+    $('#handoffLaunchClaude').onclick = () => handleLaunch('claude');
+    $('#handoffLaunchCodex').onclick = () => handleLaunch('codex');
+  }
+
+  bind();
+  return { attach, update, render, reveal };
+})();
 function closeWbEvents() {
   if (wbEs) { wbEs.close(); wbEs = null; }
   if (wbConflictRefreshTimer !== null) { clearTimeout(wbConflictRefreshTimer); wbConflictRefreshTimer = null; }
@@ -72,7 +317,6 @@ function setWbBusy(busy) {
   $('#wbSend').disabled = busy;
   $('#wbSend').textContent = busy ? t('dyn.replying') : t('wb.send');
   $('#wbRelay').disabled = busy;
-  $('#wbBuild').disabled = busy;
   $('#wbStop').hidden = !busy;
 }
 
@@ -332,7 +576,45 @@ async function refreshWbConflicts() {
   }
 }
 
-function appendWbMessage(from, name, to, text, ctx, build, meeting) {
+// 聊天→会议显式交接：消息行内小按钮展开四种事件类型（结构化字段直达 API，无文本推断）
+const XOVER_TYPES = ['supplement_material', 'correct_fact', 'answer_question', 'change_goal_or_constraint'];
+function makeXoverControl(seq) {
+  const wrap = document.createElement('span');
+  wrap.className = 'xover-ctl';
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'linklike xover-trigger';
+  trigger.textContent = t('xover.send');
+  trigger.title = t('xover.sendTitle');
+  const menu = document.createElement('span');
+  menu.className = 'xover-menu';
+  menu.hidden = true;
+  trigger.onclick = () => { menu.hidden = !menu.hidden; };
+  for (const type of XOVER_TYPES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = t('xover.t.' + type);
+    b.onclick = async () => {
+      const old = b.textContent;
+      b.disabled = true;
+      b.setAttribute('aria-busy', 'true');
+      b.textContent = t('xover.sending');
+      let r;
+      try { r = await (await fetch(`/api/workbenches/${wbId}/crossover`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ seq, type }) })).json(); }
+      catch (e) { r = { error: t('dyn.netErr', { msg: e.message }) }; }
+      b.disabled = false;
+      b.removeAttribute('aria-busy');
+      b.textContent = old;
+      if (r.error) return appendWbError(r.error); // 失败保留菜单可重试
+      menu.hidden = true;
+    };
+    menu.appendChild(b);
+  }
+  wrap.append(trigger, menu);
+  return wrap;
+}
+
+function appendWbMessage(from, name, to, text, ctx, build, meeting, attachments, seq) {
   const el = wbTyping[from]; if (el) { el.remove(); delete wbTyping[from]; }
   if (meeting) {
     const card = document.createElement('div');
@@ -341,7 +623,10 @@ function appendWbMessage(from, name, to, text, ctx, build, meeting) {
 
     const title = document.createElement('div');
     title.className = 'wb-meeting-title';
-    title.textContent = '⚖ ' + t(meeting.kind === 'verdict' ? 'wb.meetingVerdict' : 'wb.meetingStarted');
+    title.textContent = '⚖ ' + (meeting.kind === 'verdict' ? t('wb.meetingVerdict')
+      : meeting.kind === 'round' ? t('wb.meetingRound', { n: meeting.round ?? '?' })
+      : meeting.kind === 'statement' ? t('wb.meetingStatement', { n: meeting.round ?? '?', name: meeting.speaker ?? '' })
+      : t('wb.meetingStarted'));
 
     const topic = document.createElement('div');
     topic.className = 'wb-meeting-topic';
@@ -350,10 +635,10 @@ function appendWbMessage(from, name, to, text, ctx, build, meeting) {
     card.appendChild(title);
     card.appendChild(topic);
 
-    if (meeting.kind === 'verdict') {
+    if (meeting.kind === 'verdict' || meeting.kind === 'round' || meeting.kind === 'statement') {
       const details = document.createElement('details');
       const summary = document.createElement('summary');
-      summary.textContent = t('wb.meetingVerdictExpand');
+      summary.textContent = t(meeting.kind === 'verdict' ? 'wb.meetingVerdictExpand' : meeting.kind === 'round' ? 'wb.meetingRoundExpand' : 'wb.meetingStatementExpand');
       const verdict = document.createElement('pre');
       verdict.textContent = text;
       details.appendChild(summary);
@@ -392,6 +677,22 @@ function appendWbMessage(from, name, to, text, ctx, build, meeting) {
   else renderRichText(bodyEl, text); // 模型回复常带 markdown——富渲染提升可读性
   div.appendChild(nameEl);
   div.appendChild(bodyEl);
+  if (attachments?.length) { // 附件行：与后端给模型的标注一致，用户可见自己发了什么
+    const attEl = document.createElement('div');
+    attEl.className = 'chat-atts';
+    attEl.textContent = attachments.map(a => `${a.kind === 'image' ? '🖼' : '📄'} ${a.name}`).join('  ');
+    // 附件旁只保留一个显式入口，打开交接面板并从本场结论生成预览。
+    const toTask = document.createElement('button');
+    toTask.type = 'button';
+    toTask.className = 'linklike';
+    toTask.textContent = t('handoff.generate');
+    toTask.onclick = () => {
+      wbHandoffUi.reveal('#handoffGenerate');
+    };
+    attEl.appendChild(toTask);
+    div.appendChild(attEl);
+  }
+  if (seq !== undefined) div.querySelector('.chat-name')?.appendChild(makeXoverControl(seq));
   if (ctx) { // 截断明示（裁决卡：禁止静默截断）
     const chip = document.createElement('div');
     chip.className = 'ctx-chip';
@@ -566,7 +867,7 @@ function removeLiveBox() { if (wbLiveBox) { wbLiveBox.remove(); wbLiveBox = null
 function onWbEvent(ev) {
   if (ev.type === 'chat-message') {
     removeLiveBox();
-    appendWbMessage(ev.from, ev.name, ev.to, ev.data, ev.ctx, ev.build, ev.meeting);
+    appendWbMessage(ev.from, ev.name, ev.to, ev.data, ev.ctx, ev.build, ev.meeting, ev.attachments, ev.seq);
     if (ev.build) scheduleWbConflictRefresh();
     const messageText = String(ev.data ?? '');
     if (messageText.includes('【冲突对比')) {
@@ -635,6 +936,12 @@ function onWbEvent(ev) {
     div.textContent = ev.data;
     $('#wbLog').appendChild(div);
     $('#wbLog').scrollTop = $('#wbLog').scrollHeight;
+  }
+  if (ev.type === 'cap-suggestion') renderCapSuggestion(ev.data);
+  if (ev.type === 'caps-changed') { if (wbInfo) wbInfo.caps = ev.data; renderWbCaps(); }
+  if (ev.type === 'handoff') {
+    if (wbInfo) wbInfo.handoff = ev.data;
+    wbHandoffUi.update(ev.data);
   }
 }
 
@@ -706,6 +1013,132 @@ function renderWbMembers() {
   members.appendChild(workspaceButton);
 }
 
+// ===== 能力授权装配（v1）：chip + 面板 + 建议卡（全部只展示安全元数据，host 只做确定性动作） =====
+function capMetaLine(c) {
+  const perms = (c.permissions ?? []).join(',') || t('caps.none');
+  return `${localizeField(c.name)}｜${localizeField(c.summary)}｜${t('caps.risk')}:${c.risk}｜${t('caps.perms')}:${perms}`;
+}
+
+async function wbCapOp(body) {
+  let r;
+  try { r = await (await fetch(`/api/workbenches/${wbId}/capabilities`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json(); }
+  catch (e) { r = { error: t('dyn.netErr', { msg: e.message }) }; }
+  if (r.error) { appendWbError(r.error); return null; }
+  if (r.caps && wbInfo) { wbInfo.caps = r.caps; renderWbCaps(); }
+  return r;
+}
+
+function renderWbCaps() {
+  const caps = wbInfo?.caps;
+  const chip = $('#wbCapsChip');
+  if (!chip) return;
+  if (!caps) { chip.hidden = true; $('#wbCapsPanel').hidden = true; return; }
+  chip.hidden = false;
+  chip.textContent = `⛭ ${localizeField(caps.templateTitle)} · ${caps.enabled.length + caps.granted.length}`;
+  if (!$('#wbCapsPanel').hidden) renderWbCapsPanel();
+}
+
+function renderWbCapsPanel() {
+  const caps = wbInfo?.caps;
+  const panel = $('#wbCapsPanel');
+  if (!caps) return;
+  panel.replaceChildren();
+  const h = document.createElement('div');
+  h.className = 'caps-head';
+  const title = document.createElement('strong');
+  title.textContent = `${t('caps.panelTitle')} — ${localizeField(caps.templateTitle)} v${caps.templateVersion}`;
+  h.appendChild(title);
+  // 模板切换：显式选择器 + 确认框里列出能力与权限将变成什么
+  const sel = document.createElement('select');
+  sel.innerHTML = Object.entries(cfg.capTemplates ?? {}).map(([tid, tp]) => `<option value="${tid}"${tid === caps.templateId ? ' selected' : ''}>${localizeField(tp.title)}</option>`).join('');
+  sel.setAttribute('aria-label', t('caps.switch'));
+  sel.onchange = async () => {
+    const tid = sel.value;
+    if (tid === caps.templateId) return;
+    const tp = cfg.capTemplates?.[tid];
+    const enabledNames = (tp?.enabled ?? []).map(c => localizeField(c.name)).join('、') || t('caps.none');
+    const permsOn = Object.entries(tp?.permissions ?? {}).filter(([, v]) => v === true).map(([k]) => k).join(',') || t('caps.none');
+    if (!confirm(t('caps.switchConfirm', { tpl: localizeField(tp?.title), enabled: enabledNames, perms: permsOn }))) { sel.value = caps.templateId; return; }
+    sel.disabled = true;
+    const r = await wbCapOp({ op: 'set-template', templateId: tid });
+    sel.disabled = false;
+    if (!r) sel.value = caps.templateId; // 失败回弹，会议内容不受影响
+  };
+  h.appendChild(sel);
+  const close = document.createElement('button');
+  close.className = 'linklike';
+  close.textContent = t('caps.close');
+  close.onclick = () => { panel.hidden = true; };
+  h.appendChild(close);
+  panel.appendChild(h);
+  const section = (label, items, mk) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'caps-section';
+    const lab = document.createElement('em');
+    lab.textContent = label;
+    wrap.appendChild(lab);
+    if (!items.length) { const s = document.createElement('span'); s.textContent = ' ' + t('caps.none'); wrap.appendChild(s); }
+    for (const c of items) {
+      const row = document.createElement('div');
+      row.className = 'caps-row';
+      const txt = document.createElement('span');
+      txt.textContent = `${c.id} v${c.version} — ${capMetaLine(c)}`;
+      row.appendChild(txt);
+      if (mk) mk(row, c);
+      wrap.appendChild(row);
+    }
+    panel.appendChild(wrap);
+  };
+  section(t('caps.enabled'), caps.enabled);
+  section(t('caps.granted'), caps.granted, (row, c) => {
+    const wb = document.createElement('button');
+    wb.textContent = t('caps.writeback');
+    wb.onclick = async () => {
+      // 模板写回＝独立第二次确认；本场授权绝不自动落盘到模板
+      if (!confirm(t('caps.writebackConfirm', { cap: localizeField(c.name), tpl: localizeField(caps.templateTitle) }))) return;
+      wb.disabled = true;
+      const r = await wbCapOp({ op: 'writeback', id: c.id, reason: 'user-confirmed in caps panel' });
+      wb.disabled = false;
+      if (r) renderWbCapsPanel();
+    };
+    row.appendChild(wb);
+  });
+  section(t('caps.recommendable'), caps.recommendable);
+}
+
+function renderCapSuggestion(d) {
+  const div = document.createElement('div');
+  div.className = 'wb-sys wb-cap-suggest';
+  const head = document.createElement('div');
+  head.textContent = t('caps.suggestCard', { name: wbInfo?.agentNames?.[d.from] ?? d.from, cap: `${localizeField(d.name)}（${d.id}）` });
+  const meta = document.createElement('div');
+  meta.textContent = `${localizeField(d.summary)}｜${t('caps.risk')}:${d.risk}｜${t('caps.perms')}:${(d.permissions ?? []).join(',') || t('caps.none')}${d.reason ? '｜' + d.reason : ''}`;
+  const note = document.createElement('div');
+  note.textContent = t('caps.sessionOnlyNote');
+  const actions = document.createElement('div');
+  const ok = document.createElement('button');
+  ok.className = 'primary';
+  ok.textContent = t('caps.approve');
+  const no = document.createElement('button');
+  no.textContent = t('caps.deny');
+  ok.onclick = async () => {
+    ok.disabled = no.disabled = true;
+    ok.textContent = t('caps.approving');
+    const r = await wbCapOp({ op: 'grant', id: d.id });
+    if (r) div.remove();
+    else { ok.disabled = no.disabled = false; ok.textContent = t('caps.approve'); } // 失败保留卡片可重试
+  };
+  no.onclick = async () => {
+    ok.disabled = no.disabled = true;
+    const r = await wbCapOp({ op: 'deny', id: d.id });
+    if (r) div.remove(); else { ok.disabled = no.disabled = false; }
+  };
+  actions.append(ok, no);
+  div.append(head, meta, note, actions);
+  $('#wbLog').appendChild(div);
+  $('#wbLog').scrollTop = $('#wbLog').scrollHeight;
+}
+
 async function attachWorkbench(id) {
   let info;
   try { info = await (await fetch('/api/workbenches/' + id)).json(); } catch (e) { return setStatebar(t('dyn.noServer', { msg: e.message }), true); }
@@ -718,6 +1151,10 @@ async function attachWorkbench(id) {
   $('#wbTitle').textContent = info.name || t('dyn.unnamedWb');
   // 成员状态条：运行态与引擎健康态分离；成员灯和工作区芯片都可就地复查/修改
   renderWbMembers();
+  $('#wbCapsPanel').hidden = true;
+  renderWbCaps();
+  wbPendingAttachments = []; // 待发附件不跨台
+  renderWbAttachRow();
   $('#wbLog').innerHTML = '';
   $('#wbChangesList').innerHTML = '';
   $('#wbConflicts').replaceChildren();
@@ -726,6 +1163,7 @@ async function attachWorkbench(id) {
   wbInfo = info;
   wbLastSpeaker = null;
   renderWbRecipients();
+  wbHandoffUi.attach(info.handoff, info.launchAvailability);
   showView('#workbench');
   wbEs = new EventSource(`/api/workbenches/${id}/events`);
   wbEs.onmessage = e => onWbEvent(JSON.parse(e.data));
@@ -795,38 +1233,17 @@ function updateWbRouteHint() {
   renderWbActionPanel(); // 成员/能力变化同步动手面板
 }
 
-// 「变更」右栏：指派区（权限行 + 执行者 + 任务框）+ 变更卡列表（diff 全生命周期的账本）
+// 「变更」右栏：角色配置 + 变更卡列表（diff 全生命周期的账本）
 function renderWbActionPanel() {
   const panel = $('#wbChanges');
   if (!wbInfo) { panel.hidden = true; return; }
-  const capable = wbInfo.participants.filter(id => (wbInfo.writeCapable ?? []).includes(id));
-  // 挂了工作区就显示右栏（历史变更卡也要有家）；没有可写成员时只隐藏指派区
+  wbHandoffUi.render();
+  // 挂了工作区就显示右栏（历史变更卡也要有家）
   panel.hidden = !wbInfo.workspace;
-  $('#wbAssign').hidden = !capable.length;
   syncWbConflictAuthority();
-  if (panel.hidden || !capable.length) return;
+  if (panel.hidden) return;
   renderWbRoleRows();
-  const sel = $('#wbActor');
-  const prev = sel.value;
-  sel.innerHTML = '';
-  // 执行者候选 = 全部有写能力者。角色管 agent 的「自主」行为（将来聊天中能否主动出 diff）；
-  // 用户的显式指派是用户主权，不被角色拦——讨论者也可以被点名干活
-  const eligible = capable;
-  for (const id of eligible) {
-    const o = document.createElement('option');
-    o.value = id;
-    o.textContent = wbInfo.agentNames[id] ?? id;
-    sel.appendChild(o);
-  }
-  if (!eligible.length) {
-    const o = document.createElement('option');
-    o.value = '';
-    o.textContent = t('wb.noEligibleActor');
-    sel.appendChild(o);
-  }
-  if (eligible.includes(prev)) sel.value = prev; // 成员/权限变动后尽量保住已选执行者
-  $('#wbBuild').disabled = !eligible.length;
-  syncWbBuildLabel();
+  $('#wbAssign').hidden = !$('#wbPermRows').childElementCount;
 }
 
 // 角色行（叠加制）：能力下拉（讨论者/提案者）+「仲裁」勾选；勾了仲裁再露出「替我决断」档
@@ -888,12 +1305,6 @@ async function setWbRole(agentId, role, arbiter, decide) {
   renderWbActionPanel();
 }
 
-function syncWbBuildLabel() {
-  const sel = $('#wbActor');
-  const name = sel.selectedOptions[0]?.textContent;
-  $('#wbBuild').textContent = name ? t('wb.buildWith', { name }) : t('wb.build');
-}
-
 async function changeParticipants(op, agentId) {
   let r;
   try { r = await (await fetch(`/api/workbenches/${wbId}/participants`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op, agentId }) })).json(); }
@@ -912,13 +1323,61 @@ async function resumeWorkbench(dirname) {
   await attachWorkbench(r.id);
 }
 
+// ===== 附件：上传后暂存为待发列表，随下一条消息一起提交 =====
+let wbPendingAttachments = []; // [{file, name, kind, size}]（file=服务端存储名）
+
+function renderWbAttachRow() {
+  const row = $('#wbAttachRow');
+  row.replaceChildren();
+  row.hidden = !wbPendingAttachments.length;
+  for (const a of wbPendingAttachments) {
+    const chip = document.createElement('span');
+    chip.className = 'wb-att-chip' + (a.uploading ? ' wb-att-uploading' : '');
+    chip.textContent = `${a.kind === 'image' ? '🖼' : '📄'} ${a.name}${a.uploading ? ' …' : ` (${Math.max(1, Math.round(a.size / 1024))}KB)`}`;
+    if (!a.uploading) {
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '✕';
+      x.setAttribute('aria-label', t('wb.attRemove'));
+      x.onclick = () => { wbPendingAttachments = wbPendingAttachments.filter(p => p !== a); renderWbAttachRow(); };
+      chip.appendChild(x);
+    }
+    row.appendChild(chip);
+  }
+}
+
+async function uploadWbFiles(files) {
+  for (const f of files) {
+    const staged = { name: f.name, kind: '', size: f.size, uploading: true };
+    wbPendingAttachments.push(staged);
+    renderWbAttachRow();
+    let r;
+    try {
+      r = await (await fetch(`/api/workbenches/${wbId}/upload`, {
+        method: 'POST', headers: { 'x-rt-filename': encodeURIComponent(f.name) }, body: f,
+      })).json();
+    } catch (e) { r = { error: t('dyn.netErr', { msg: e.message }) }; }
+    if (r.error) {
+      wbPendingAttachments = wbPendingAttachments.filter(p => p !== staged);
+      renderWbAttachRow();
+      appendWbError(`${f.name}: ${r.error}`);
+      continue;
+    }
+    Object.assign(staged, r, { uploading: false });
+    renderWbAttachRow();
+  }
+}
+
 async function sendWbMessage() {
   const text = $('#wbInput').value.trim();
-  if (!text || !wbId) return;
+  const attachments = wbPendingAttachments.filter(a => !a.uploading).map(({ file, name, kind, size }) => ({ file, name, kind, size }));
+  if ((!text && !attachments.length) || !wbId) return;
   const to = [...$('#wbRecipients').querySelectorAll('input:checked')].map(cb => cb.value);
   $('#wbInput').value = '';
+  wbPendingAttachments = [];
+  renderWbAttachRow();
   let r;
-  try { r = await (await fetch(`/api/workbenches/${wbId}/message`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, to }) })).json(); }
+  try { r = await (await fetch(`/api/workbenches/${wbId}/message`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, to, attachments }) })).json(); }
   catch (e) { return appendWbError(t('dyn.netErr', { msg: e.message })); }
   if (r.error) appendWbError(r.error);
 }
@@ -938,41 +1397,39 @@ $('#wbCreate').onclick = async () => {
     if (roles[cb.dataset.agent]) roles[cb.dataset.agent].arbiter = cb.checked;
   }
   let r;
-  try { r = await (await fetch('/api/workbenches', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: $('#wbName').value.trim(), workspace: $('#wbWorkspace').value.trim(), participants, roles, lang: LANG }) })).json(); }
+  try { r = await (await fetch('/api/workbenches', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: $('#wbName').value.trim(), workspace: $('#wbWorkspace').value.trim(), participants, roles, capTemplate: $('#wbCapTpl').value, lang: LANG }) })).json(); }
   catch (e) { return err(t('dyn.createFail', { msg: e.message })); }
   if (r.error) return showWorkspaceError(bar, $('#wbWorkspace'), r);
   await attachWorkbench(r.id);
 };
 $('#wbSend').onclick = sendWbMessage;
+$('#wbAttachBtn').onclick = () => $('#wbAttachInput').click();
+$('#wbAttachInput').addEventListener('change', async e => {
+  const files = [...e.target.files];
+  e.target.value = ''; // 允许再次选择同一文件
+  if (files.length && wbId) await uploadWbFiles(files);
+});
 $('#wbRelay').onclick = async () => {
   if (!wbId) return;
   const checked = [...$('#wbRecipients').querySelectorAll('input:checked')].map(cb => cb.value);
   const order = checked.length >= 2 ? checked : []; // 勾了 ≥2 个就按勾选圈子聊，否则全体参与
+  const seed = $('#wbInput').value.trim(); // 输入框里的话＝本场讨论的题面，一并带上
+  $('#wbInput').value = '';
+  const restore = msg => { if (seed && !$('#wbInput').value) $('#wbInput').value = seed; appendWbError(msg); }; // 没开成别把用户写的话吞掉
   let r;
-  try { r = await (await fetch(`/api/workbenches/${wbId}/relay`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rounds: Number($('#wbRounds').value) || 2, order }) })).json(); }
-  catch (e) { return appendWbError(t('dyn.netErr', { msg: e.message })); }
-  if (r.error) appendWbError(r.error);
+  try { r = await (await fetch(`/api/workbenches/${wbId}/relay`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rounds: Number($('#wbRounds').value) || 2, order, seed }) })).json(); }
+  catch (e) { return restore(t('dyn.netErr', { msg: e.message })); }
+  if (r.error) restore(r.error);
 };
 $('#wbStop').onclick = () => { if (wbId) fetch(`/api/workbenches/${wbId}/stop`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); };
-$('#wbBuild').onclick = async () => {
-  if (!wbId) return;
-  const text = $('#wbTask').value.trim();
-  if (!text) return appendWbError(t('dyn.buildNeedText'));
-  const agentId = $('#wbActor').value;
-  if (!agentId) return appendWbError(t('dyn.buildNotCapable'));
-  $('#wbTask').value = '';
-  let r;
-  try { r = await (await fetch(`/api/workbenches/${wbId}/build`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, agentId }) })).json(); }
-  catch (e) { return appendWbError(t('dyn.netErr', { msg: e.message })); }
-  if (r.error) appendWbError(r.error);
-};
-$('#wbActor').onchange = syncWbBuildLabel;
 $('#wbInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendWbMessage(); }
 });
-$('#wbTask').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $('#wbBuild').onclick(); }
-});
+$('#wbCapsChip').onclick = () => {
+  const p = $('#wbCapsPanel');
+  p.hidden = !p.hidden;
+  if (!p.hidden) renderWbCapsPanel();
+};
 $('#wbPromote').onclick = async () => {
   if (!wbId) return;
   let r;

@@ -4,6 +4,12 @@ This file is for Roundtable users. For the detailed internal development stream,
 
 Before 1.0, `0.x.y` uses `y` for bug-fix-only releases, while `x` releases may include breaking changes. / 1.0 之前，`0.x.y` 中的 `y` 只修 bug，`x` 版本可能包含破坏性变更。
 
+## v0.4.1 - 2026-07-26
+
+### Fixed / 修复
+
+- Upload filename sanitization is now platform-independent. Windows-style traversal names such as `..\..\hack.txt` are reduced to a safe basename on Linux as well as Windows, and resolved attachment paths must remain inside the session `uploads/` directory. The full Windows/Ubuntu × Node 20/22 CI matrix now passes. / 上传文件名清洗现在与运行平台无关。Windows 风格的路径穿越名（如 `..\..\hack.txt`）在 Linux 和 Windows 上都会被收敛为安全的纯文件名；解析后的附件路径还必须留在会话的 `uploads/` 目录内。Windows/Ubuntu × Node 20/22 的完整 CI 矩阵现已全部通过。
+
 ## v0.4.0 - 2026-07-25
 
 ### Added / 新增

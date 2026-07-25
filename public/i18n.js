@@ -337,6 +337,7 @@ const I18N = {
   // ---- 执行交接 ----
   'handoff.panelTitle': { zh: '复制给桌面执行', en: 'Copy for desktop' },
   'handoff.quickIntro': { zh: '点「总结并生成预览」，让一个模型现场把这场讨论提炼成一段干净任务（消耗一次模型调用、约几秒）；你审阅后复制到剪贴板，粘到 Claude/Codex 桌面版执行。Roundtable 只负责一字不差地复制。', en: 'Click “Summarize & preview” to have a model distill this discussion into a clean task on the spot (uses one model call, a few seconds). Review it, copy to the clipboard, then paste into your Claude/Codex desktop app to run. Roundtable only guarantees a byte-exact copy.' },
+  'handoff.agentLabel': { zh: '用哪个模型来总结', en: 'Summarize with' },
   'handoff.generate': { zh: '总结并生成预览', en: 'Summarize & preview' },
   'handoff.generating': { zh: '正在读取本场结论…', en: 'Reading this discussion’s conclusion…' },
   'handoff.summarizing': { zh: '总结中…', en: 'Summarizing…' },

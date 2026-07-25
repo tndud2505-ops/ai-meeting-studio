@@ -112,11 +112,16 @@ test('极简 DOM 只保留说明、生成、复制后预览与底部启动按钮
   const panel = html.slice(start, end);
   assert.match(panel, /handoff\.quickIntro/);
   assert.match(panel, /id='handoffGenerate'/);
+  // 唯一的表单控件：选「用哪个模型来总结」的下拉，位于生成按钮之前
+  assert.match(panel, /id='handoffAgent'/);
+  assert.ok(panel.indexOf("id='handoffAgent'") < panel.indexOf("id='handoffGenerate'"));
   assert.match(panel, /id='handoffPreviewTitle'[^>]*>要复制的完整内容</);
   assert.match(panel, /id='handoffCopy'[\s\S]*?<\/button>\s*<pre id='handoffPreview'/);
   assert.ok(panel.indexOf("id='handoffCopy'") < panel.indexOf("id='handoffPreview'"));
   assert.ok(panel.indexOf("id='handoffPreview'") < panel.indexOf("id='handoffLaunchClaude'"));
-  assert.doesNotMatch(panel, /<textarea|<select|<form|type='checkbox'|SHA-256|BYTES/);
+  // 除总结模型下拉外，不引入 textarea/表单/复选框等复杂控件，也不暴露哈希/字节术语
+  assert.equal([...panel.matchAll(/<select/g)].length, 1);
+  assert.doesNotMatch(panel, /<textarea|<form|type='checkbox'|SHA-256|BYTES/);
   const removedIds = [
     'handoff' + 'TargetForm', 'handoff' + 'PackageForm', 'handoff' + 'Review',
     'handoff' + 'FromConclusion', 'handoff' + 'Compile', 'handoff' + 'QuickCopy',
@@ -183,7 +188,10 @@ test('生成预览按现场总结返回文本，首尾与换行保真，复制�
       return { status: 404, body: { error: 'unexpected' } };
     },
   });
+  // 展开面板不应自动总结——只有点「总结并生成预览」才发起调用
   await controller.elementFor('#handoffToggle').onclick();
+  assert.equal(controller.calls.length, 0, '展开面板不得触发任何请求');
+  await controller.elementFor('#handoffGenerate').onclick();
   assert.equal(controller.elementFor('#handoffPreview').textContent, text);
   assert.equal(controller.elementFor('#handoffPreviewBlock').hidden, false);
   assert.equal(controller.elementFor('#handoffCopy').disabled, false);
@@ -197,6 +205,25 @@ test('生成预览按现场总结返回文本，首尾与换行保真，复制�
   assert.equal(audit.taskId, audit.fullTextSha256);
   assert.equal(audit.readbackOk, true);
   assert.match(controller.elementFor('#handoffFeedback').textContent, /handoff\.quickCopied/);
+});
+
+test('可选择用哪个模型总结：默认第一个参与者，切换后随请求带上选中的 agentId', async () => {
+  let sentAgent = 'UNSET';
+  const controller = loadHandoffController({
+    clipboard: loadClipboard(fakeClipboard()),
+    respond(call) {
+      if (call.url.endsWith('/exec-package/summarize')) { sentAgent = call.body.agentId; return { body: { text: 'T', name: 'B' } }; }
+      return { status: 404, body: { error: 'unexpected' } };
+    },
+  });
+  controller.ui.attach({}, { claude: { available: true }, codex: { available: true } }, [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }]);
+  // 默认交给第一个参与者
+  await controller.elementFor('#handoffGenerate').onclick();
+  assert.equal(sentAgent, 'a');
+  // 切到第二个模型后再生成，请求体带上 b
+  controller.elementFor('#handoffAgent').onchange({ target: { value: 'b' } });
+  await controller.elementFor('#handoffGenerate').onclick();
+  assert.equal(sentAgent, 'b');
 });
 
 test('空结论显示明确提示、复制按钮 disabled，且不进入成功或审计路径', async () => {

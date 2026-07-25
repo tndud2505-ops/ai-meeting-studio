@@ -17,8 +17,27 @@ const wbHandoffUi = (() => {
     busy: null,
     copyHadError: false,
     lastCopySuccess: false,
+    participants: [],      // [{ id, name }] —— 可选来做总结的模型
+    selectedAgent: null,   // 当前选中的总结模型（null = 让后端用第一个参与者）
     feedback: { handoff: null, launch: null },
   };
+
+  const escAttr = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // 总结模型下拉：选项随参与者变化重建；单选无强制默认——null 表示交给后端用第一个参与者。
+  function renderAgentOptions() {
+    const sel = $('#handoffAgent');
+    if (!sel) return;
+    if (state.participants.length && !state.participants.some(p => p.id === state.selectedAgent)) {
+      state.selectedAgent = state.participants[0].id;
+    }
+    if (!state.participants.length) state.selectedAgent = null;
+    sel.innerHTML = state.participants.map(p => `<option value="${escAttr(p.id)}">${escAttr(p.name)}</option>`).join('');
+    sel.value = state.selectedAgent ?? '';
+    sel.disabled = !!state.busy || state.participants.length === 0;
+    const row = $('#handoffAgentRow');
+    if (row) row.hidden = state.participants.length === 0;
+  }
 
   const motionBehavior = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
   const setFeedback = (slot, kind, text) => { state.feedback[slot] = { kind, text }; };
@@ -78,6 +97,7 @@ const wbHandoffUi = (() => {
   }
 
   function renderHandoff() {
+    renderAgentOptions();
     const generating = state.busy === 'generate';
     const generate = $('#handoffGenerate');
     generate.textContent = t(generating ? 'handoff.summarizing' : 'handoff.generate');
@@ -109,7 +129,7 @@ const wbHandoffUi = (() => {
     setFeedback('handoff', 'loading', t('handoff.summarizing'));
     render();
     try {
-      const result = await postJson('exec-package/summarize', {});
+      const result = await postJson('exec-package/summarize', state.selectedAgent ? { agentId: state.selectedAgent } : {});
       if (!result.httpOk || typeof result.text !== 'string') throw new Error(responseError(result));
       state.previewText = String(result.text ?? '');
       state.hasGenerated = true;
@@ -204,13 +224,21 @@ const wbHandoffUi = (() => {
     render();
   }
 
-  function attach(_summary, launchAvailability = {}) {
+  // 参与者名单变化时刷新总结模型下拉（成员进出后可选项跟着变）
+  function setParticipants(participants = []) {
+    state.participants = Array.isArray(participants) ? participants : [];
+    render();
+  }
+
+  function attach(_summary, launchAvailability = {}, participants = []) {
     state.launchAvailability = launchAvailability ?? {};
     state.previewText = '';
     state.hasGenerated = false;
     state.busy = null;
     state.copyHadError = false;
     state.lastCopySuccess = false;
+    state.participants = Array.isArray(participants) ? participants : [];
+    state.selectedAgent = state.participants[0]?.id ?? null;
     state.feedback = { handoff: null, launch: null };
     $('#handoffBody').hidden = true;
     $('#handoffToggle').setAttribute('aria-expanded', 'false');
@@ -218,23 +246,24 @@ const wbHandoffUi = (() => {
     render();
   }
 
-  async function reveal(focusSelector = '#handoffToggle') {
+  // 打开面板只展开，绝不自动跑总结——总结必须由用户点「总结并生成预览」触发。
+  function reveal(focusSelector = '#handoffGenerate') {
     $('#handoffBody').hidden = false;
     $('#handoffToggle').setAttribute('aria-expanded', 'true');
     $('.handoff-toggle-mark').textContent = '-';
     $('#handoffPanel').scrollIntoView({ block: 'start', behavior: motionBehavior() });
     $(focusSelector)?.focus({ preventScroll: true });
-    await handleGenerate();
   }
 
   function bind() {
-    $('#handoffToggle').onclick = async () => {
+    $('#handoffToggle').onclick = () => {
       const body = $('#handoffBody');
       body.hidden = !body.hidden;
       $('#handoffToggle').setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
       $('.handoff-toggle-mark').textContent = body.hidden ? '+' : '-';
-      if (!body.hidden) await handleGenerate();
+      // 展开不触发总结——只在用户点按钮时才跑
     };
+    $('#handoffAgent').onchange = event => { state.selectedAgent = event.target.value || null; };
     $('#wbDispatchPointer').onclick = () => reveal();
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && !$('#handoffBody').hidden && !$('#workbench').hidden) {
@@ -251,7 +280,7 @@ const wbHandoffUi = (() => {
   }
 
   bind();
-  return { attach, update, render, reveal };
+  return { attach, update, render, reveal, setParticipants };
 })();
 function closeWbEvents() {
   if (wbEs) { wbEs.close(); wbEs = null; }
@@ -880,7 +909,10 @@ function onWbEvent(ev) {
   if (ev.type === 'participants' && wbInfo) {
     // 成员变化事件（含重连回放）——与本地一致则跳过，避免与 changeParticipants 的响应刷新互踩
     const same = ev.data.length === wbInfo.participants.length && ev.data.every(p => wbInfo.participants.includes(p));
-    if (!same) { wbInfo.participants = ev.data; renderWbMembers(); renderWbRecipients(); }
+    if (!same) {
+      wbInfo.participants = ev.data; renderWbMembers(); renderWbRecipients();
+      wbHandoffUi.setParticipants(wbInfo.participants.map(id => ({ id, name: wbInfo.agentNames?.[id] ?? cfg.agents?.[id]?.name ?? id })));
+    }
   }
   if (ev.type === 'build-progress') {
     const pre = ensureLiveBox(cfg.agents[ev.agentId]?.name ?? ev.agentId);
@@ -1163,7 +1195,7 @@ async function attachWorkbench(id) {
   wbInfo = info;
   wbLastSpeaker = null;
   renderWbRecipients();
-  wbHandoffUi.attach(info.handoff, info.launchAvailability);
+  wbHandoffUi.attach(info.handoff, info.launchAvailability, info.participants.map(id => ({ id, name: info.agentNames?.[id] ?? cfg.agents?.[id]?.name ?? id })));
   showView('#workbench');
   wbEs = new EventSource(`/api/workbenches/${id}/events`);
   wbEs.onmessage = e => onWbEvent(JSON.parse(e.data));

@@ -161,6 +161,10 @@
             </button>
             <div id='handoffBody' hidden>
               <p class='handoff-intro' data-i18n='handoff.quickIntro'>把这场讨论的结论复制到剪贴板，粘到你的 Claude/Codex 桌面版执行。Roundtable 只负责一字不差地复制，执行由你在桌面完成。</p>
+              <div id='handoffAgentRow' class='handoff-agent-row'>
+                <label for='handoffAgent' data-i18n='handoff.agentLabel'>用哪个模型来总结</label>
+                <select id='handoffAgent'></select>
+              </div>
               <button id='handoffGenerate' class='primary' type='button' data-i18n='handoff.generate'>生成预览</button>
               <section id='handoffPreviewBlock' aria-labelledby='handoffPreviewTitle' hidden>
                 <h4 id='handoffPreviewTitle' data-i18n='handoff.previewTitle'>要复制的完整内容</h4>

@@ -4,7 +4,7 @@ This file is for Roundtable users. For the detailed internal development stream,
 
 Before 1.0, `0.x.y` uses `y` for bug-fix-only releases, while `x` releases may include breaking changes. / 1.0 之前，`0.x.y` 中的 `y` 只修 bug，`x` 版本可能包含破坏性变更。
 
-## Unreleased
+## v0.4.0 - 2026-07-25
 
 ### Added / 新增
 

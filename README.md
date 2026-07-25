@@ -6,7 +6,7 @@
 
 [▶ Watch the 67s English walkthrough](docs/demo-en.mp4) · [中文解说版](docs/demo.mp4)
 
-[Get the stable v0.3.1 release](https://github.com/ai-us-stock-lab/roundtable/releases/tag/v0.3.1) · [Test it on a real decision and report what happened](https://github.com/ai-us-stock-lab/roundtable/issues/1)
+[Get the stable v0.4.0 release](https://github.com/ai-us-stock-lab/roundtable/releases/tag/v0.4.0) · [Test it on a real decision and report what happened](https://github.com/ai-us-stock-lab/roundtable/issues/1)
 
 > Rides your own CLI subscriptions (Claude Code / Codex / …) — zero marginal API cost, zero dependencies, all local. The UI ships in **English and 中文** (toggle in the top-left).
 >
@@ -90,7 +90,7 @@ npm start
 - **Relay** — "Let them talk × N": models take turns, each sees the full labeled thread, pushes back and questions by name; stop anytime, auto-ends when talked out.
 - **Build (write mode)**: mount a git repo, pick one model, hit Build — it creates/edits files in an isolated **git worktree**, posts a per-file diff card; you **Apply / Discard** each. Your working tree is untouched until you apply; applies land in the tree and are **never auto-committed** (commit stays in your own git flow). Write access is narrowed: Claude runs file-tools-only (no Bash), Codex uses native `--sandbox workspace-write`.
 - **Run check** on a temp copy before applying; **session resume** so a model remembers files it already touched across builds.
-- **Execution handoff** compiles a deterministic, versioned task text with visible start/end markers. After reviewing the complete text, you explicitly confirm and copy it; the browser immediately reads it back and compares exact text, UTF-8 bytes, and SHA-256. The saved Claude/Codex target is only your own label — Roundtable does not connect to that desktop thread, paste, send, execute, or verify the eventual desktop input/result.
+- **Execution handoff** copies a discussion's conclusion to your clipboard so you can paste it into your context-rich Claude/Codex desktop app and run it there. Nothing runs until you click: a model you choose distills the whole discussion into one clean, paste-ready task; you review the complete text, then copy — the browser immediately reads it back and compares exact text, UTF-8 bytes, and SHA-256. Roundtable only assembles and copies — it never connects to the desktop app, pastes, sends, or executes, and the copied natural-language text is never re-interpreted as commands.
 - **Promote to meeting** packages the chat into a committee draft (and the verdict can flow back).
 
 **Committee (structured debate)**
@@ -257,7 +257,7 @@ npm start
 - **互聊**：「让他们讨论 × N 轮」——模型按顺序接力发言，每位都看到完整讨论（含其他模型的标注发言），被鼓励点名反驳与追问；随时可停，模型回复【无新增】自动收敛终止
 - 长历史自动裁剪（整条消息取舍，绝不切半），裁剪时界面明示"该模型仅看到最近 N 条"——禁止静默截断
 - **动手（写模式）**：工作台挂载 git 项目目录后，勾选一位模型点「动手」——它在 **git worktree 隔离副本**里真实创建/修改文件，产出 diff 卡片贴回聊天；你逐个审批「应用到主工作区 / 丢弃」。主工作区在你点应用之前零接触；应用只落到工作树，commit 权始终在你自己的 git 流程里。写权限收窄：Claude 只开文件工具（禁 Bash），Codex 走原生 `--sandbox workspace-write`
-- **执行交接**：把任务编译为带版本和可见首尾标记的确定性全文。你看完全文后显式点「确认并复制」，浏览器立即回读，并逐字比较文本、UTF-8 字节数与 SHA-256。保存的 Claude/Codex 目标只是你手填的识别标签；Roundtable 不连接桌面线程、不自动粘贴或发送、不执行，也无法验证桌面输入框或最终结果。
+- **执行交接**：把一场讨论的结论复制到剪贴板，供你粘到上下文更全的 Claude/Codex 桌面版去执行。不点不跑：由你选定的模型现场把整场讨论提炼成一段可直接粘贴的干净任务；你看完全文后点「复制」，浏览器立即回读并逐字比较文本、UTF-8 字节数与 SHA-256。Roundtable 只负责装配与复制——绝不连接桌面版、不自动粘贴/发送、不执行，复制出的自然语言也绝不被当作命令解析。
 - **升格为会议**：一键把讨论打包成会议草稿，转入正式委员会流程（裁决可回流）
 - 全程落盘（每条消息、每次调用的完整 prompt 与原始输出），跨重启恢复
 

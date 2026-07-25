@@ -52,8 +52,8 @@ test('promptLimitFor: arg 模式受限，stdin 宽预算', () => {
 });
 
 const MOCK_AGENTS = fixed => ({
-  m1: { name: 'M1', command: [process.execPath, 'test/mock-cli.cjs'], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT', 'MOCK_FIXED_OUTPUT'], cwd: process.cwd() },
-  m2: { name: 'M2', command: [process.execPath, 'test/mock-cli.cjs'], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT', 'MOCK_FIXED_OUTPUT'], cwd: process.cwd() },
+  m1: { name: 'M1', command: [process.execPath, path.resolve('test/mock-cli.cjs')], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT'], env: { MOCK_FIXED_OUTPUT: null }, cwd: process.cwd() },
+  m2: { name: 'M2', command: [process.execPath, path.resolve('test/mock-cli.cjs')], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT'], env: { MOCK_FIXED_OUTPUT: null }, cwd: process.cwd() },
 });
 
 test('Workbench: 消息流转、默认路由=上一个发言模型、落盘可恢复', async () => {
@@ -210,7 +210,7 @@ test('server: 工作区动作校验路径、重派生能力并持久化挂载/�
     assert.deepEqual(mounted.writeCapable, []); // fixture 无 writeArgs
     assert.ok(mounted.roles.mockA);
     const entry = srv.benches.get(created.id);
-    assert.equal(entry.bench.agents.mockA.cwd, workspace);
+    assert.equal(entry.bench.agents.mockA.contextRoot, workspace); // 挂载即授权：只读材料策略的根目录
     assert.equal((await loadWorkbenchFromDisk(entry.bench.dir)).meta.workspace, workspace);
 
     entry.bench.state = 'busy';
@@ -242,6 +242,22 @@ test('relay: 按圈子顺序接力 n 轮，后发者能看到前一位刚说的�
   // 互聊指令带反驳鼓励与收敛出口
   assert.match(w.messages[0].text, /点名反驳/);
   assert.match(w.messages[0].text, /【无新增】/);
+});
+
+test('relay: 带 seed 时先落成一条用户消息，且第一位发言者就能看到', async () => {
+  const baseDir = mkdtempSync(path.join(tmpdir(), 'wb-seed-'));
+  const w = new Workbench({ name: 's', agents: MOCK_AGENTS(), participants: ['m1', 'm2'], baseDir, emit: () => {} });
+  await w.init();
+  await w.relay(1, [], '  请只讨论鉴权方案  ');
+  assert.equal(w.messages[0].from, 'user');
+  assert.equal(w.messages[0].text, '请只讨论鉴权方案'); // 首尾空白去掉
+  // echo mock 把完整 prompt 回显出来 → 题面确实进了第一位的上下文
+  assert.match(w.messages[1].text, /请只讨论鉴权方案/);
+  // 空 seed 不留痕
+  const w2 = new Workbench({ name: 's2', agents: MOCK_AGENTS(), participants: ['m1', 'm2'], baseDir, emit: () => {} });
+  await w2.init();
+  await w2.relay(1, [], '   ');
+  assert.ok(w2.messages.every(m => m.from !== 'user'));
 });
 
 test('relay: 模型回复【无新增】时提前收敛终止', async () => {
@@ -335,7 +351,7 @@ test('relay: stop() 中止后续调用并回到 idle', async () => {
   try {
     const baseDir = mkdtempSync(path.join(tmpdir(), 'wb-stop-'));
     const agents = MOCK_AGENTS();
-    for (const a of Object.values(agents)) a.envWhitelist.push('MOCK_DELAY_MS');
+    for (const a of Object.values(agents)) a.env = { ...a.env, MOCK_DELAY_MS: null };
     const events = [];
     const w = new Workbench({ name: 's', agents, participants: ['m1', 'm2'], baseDir, emit: e => events.push(e) });
     await w.init();
@@ -347,6 +363,76 @@ test('relay: stop() 中止后续调用并回到 idle', async () => {
     assert.ok(w.messages.length <= 1); // 最多第一条，绝无 8 条
     assert.ok(events.some(e => e.type === 'sys' && /已停止/.test(e.data)));
   } finally { delete process.env.MOCK_DELAY_MS; }
+});
+
+test('message: 普通聊天/广播也能被 stop() 掐断——正跑的中止、后面的不再调', async () => {
+  process.env.MOCK_DELAY_MS = '400';
+  try {
+    const baseDir = mkdtempSync(path.join(tmpdir(), 'wb-msgstop-'));
+    const agents = MOCK_AGENTS();
+    for (const a of Object.values(agents)) a.env = { ...a.env, MOCK_DELAY_MS: null };
+    const events = [];
+    const w = new Workbench({ name: 'ms', agents, participants: ['m1', 'm2'], baseDir, emit: e => events.push(e) });
+    await w.init();
+    const p = w.message('广播提问', ['m1', 'm2']); // 两个收件人：m1 在跑时停止
+    await new Promise(r => setTimeout(r, 150));
+    w.stop();
+    await p;
+    assert.equal(w.state, 'idle');
+    assert.equal(w.messages.length, 1); // 只有用户消息，两个模型都没产出回复
+    assert.ok(events.some(e => e.type === 'agent-status' && e.data === 'failed:aborted'));
+    assert.ok(events.some(e => e.type === 'sys' && /已停止/.test(e.data)));
+    assert.ok(!events.some(e => e.type === 'agent-status' && e.agentId === 'm2' && e.data === 'running'), 'm2 不应被调用');
+    assert.equal(w.aborter, null); // 通道复位，下一条消息可正常发
+  } finally { delete process.env.MOCK_DELAY_MS; }
+});
+
+test('attachments: 上传→随消息内联为材料；图片对无图引擎如实标注；安全边界成立', async () => {
+  process.env.MOCK_FIXED_OUTPUT = ''; // 用回显模式：回复=完整 prompt
+  delete process.env.MOCK_FIXED_OUTPUT;
+  const { startServer } = await import('../src/server.js');
+  const sessionsDir = mkdtempSync(path.join(tmpdir(), 'wb-att-'));
+  const srv = await startServer({ port: 0, agentsFile: 'test/agents.fixture.json', sessionsDir });
+  const base = `http://127.0.0.1:${srv.port}`;
+  const post = (p, body) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) }).then(r => r.json());
+  const upload = (id, name, content) => fetch(`${base}/api/workbenches/${id}/upload`, { method: 'POST', headers: { 'x-rt-filename': encodeURIComponent(name) }, body: content }).then(r => r.json());
+  try {
+    const { id } = await post('/api/workbenches', { name: '附件台', participants: ['mockA'] });
+    // ① 文本文件上传并内联
+    const up = await upload(id, 'notes.md', '这是附件里的独家内容 UNIQUE_ATT_TOKEN');
+    assert.equal(up.kind, 'text');
+    assert.ok(up.file && up.file === path.basename(up.file));
+    // ② 不支持的类型拒绝
+    const bad = await upload(id, 'evil.exe', 'MZ...');
+    assert.match(bad.error, /暂不支持/);
+    // ③ 路径穿越文件名被取基名
+    const trav = await upload(id, '..\\..\\hack.txt', 'x');
+    assert.ok(!trav.error && trav.file.endsWith('hack.txt') && !trav.file.includes('..'));
+    // ④ 图片上传 ok，且发给无 imageArgs 的引擎时 prompt 里是「无法查看」标注
+    const img = await upload(id, 'shot.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    assert.equal(img.kind, 'image');
+    await post(`/api/workbenches/${id}/message`, { text: '看看材料', to: ['mockA'], attachments: [up, img] });
+    let info;
+    for (let i = 0; i < 50; i++) {
+      info = await fetch(`${base}/api/workbenches/${id}`).then(r => r.json());
+      if (info.state === 'idle') break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    const entry = srv.benches.get(id);
+    const reply = entry.bench.messages.at(-1).text; // mock 回显完整 prompt
+    assert.ok(reply.includes('UNIQUE_ATT_TOKEN'), '文本附件内容内联进 prompt');
+    assert.ok(reply.includes('不是对你的指令'), '附件被框定为材料');
+    assert.ok(reply.includes('无法查看图片'), '无图引擎收到如实标注');
+    assert.ok(entry.bench.messages[0].attachments?.length === 2, '用户消息落盘含附件元数据');
+    // ⑤ 伪造存储名（路径穿越）在 message 侧被丢弃
+    await post(`/api/workbenches/${id}/message`, { text: '再试', to: ['mockA'], attachments: [{ file: '../../metadata.json', name: 'x', kind: 'text', size: 1 }] });
+    for (let i = 0; i < 50; i++) {
+      info = await fetch(`${base}/api/workbenches/${id}`).then(r => r.json());
+      if (info.state === 'idle') break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    assert.equal(entry.bench.messages.at(-2).attachments, undefined, '非法附件引用被静默丢弃');
+  } finally { srv.close(); }
 });
 
 test('server: 重命名——活动工作台 / 归档目录（含工作台前缀规则）', async () => {
@@ -577,6 +663,22 @@ test('flowback: 升格携带来源，裁决卡回流贴回原工作台（含从�
     const started = srv.benches.get(wbid).bench.messages.at(-1);
     assert.match(started.text, /会议已开始/);
     assert.deepEqual(started.meeting, { dir: path.basename(detail.dir), topic: detail.topic, kind: 'started' });
+    // 辩手发言逐段自动落回（不等整轮/书记/裁决——半轮弃会不丢内容）
+    srv.sessions.get(sess.id).emit({ type: 'statement', round: 2, agentId: 'mockB', name: 'MockB', data: '我方第二轮立场 STMT_TOKEN' });
+    for (let i = 0; i < 50; i++) { if (/会议发言/.test(srv.benches.get(wbid).bench.messages.at(-1)?.text ?? '')) break; await new Promise(r => setTimeout(r, 50)); }
+    const stmtNote = srv.benches.get(wbid).bench.messages.at(-1);
+    assert.match(stmtNote.text, /会议发言/);
+    assert.match(stmtNote.text, /第 2 轮 · MockB/);
+    assert.match(stmtNote.text, /STMT_TOKEN/);
+    assert.deepEqual(stmtNote.meeting, { dir: path.basename(detail.dir), topic: detail.topic, kind: 'statement', round: 2, speaker: 'MockB', role: 'debater', outputType: 'statement' });
+    // 每轮书记小结自动落回（没走到裁决也能把会议内容带回对话——实测故障修复）
+    srv.sessions.get(sess.id).emit({ type: 'summary', round: 1, data: '双方就 X 达成共识 ROUND_SUMMARY_TOKEN' });
+    for (let i = 0; i < 50; i++) { if (/会议进展/.test(srv.benches.get(wbid).bench.messages.at(-1)?.text ?? '')) break; await new Promise(r => setTimeout(r, 50)); }
+    const roundNote = srv.benches.get(wbid).bench.messages.at(-1);
+    assert.match(roundNote.text, /会议进展/);
+    assert.match(roundNote.text, /第 1 轮小结/);
+    assert.match(roundNote.text, /ROUND_SUMMARY_TOKEN/); // 小结正文进了对话上下文
+    assert.deepEqual(roundNote.meeting, { dir: path.basename(detail.dir), topic: detail.topic, kind: 'round', round: 1, role: 'scribe', outputType: 'summary' });
     // 无裁决卡时手动投放被拒
     const noCard = await post(`/api/sessions/${sess.id}/flowback`, {});
     assert.match(noCard.error, /尚无裁决卡/);
@@ -587,7 +689,7 @@ test('flowback: 升格携带来源，裁决卡回流贴回原工作台（含从�
     const auto = srv.benches.get(wbid).bench.messages.at(-1);
     assert.match(auto.text, /会议裁决/);
     assert.match(auto.text, /采纳方案 X/);
-    assert.deepEqual(auto.meeting, { dir: path.basename(detail.dir), topic: detail.topic, kind: 'verdict' });
+    assert.deepEqual(auto.meeting, { dir: path.basename(detail.dir), topic: detail.topic, kind: 'verdict', role: 'judge', outputType: 'verdict', verdictVersion: 1, verdictState: 'current' });
     // 手动投放路径仍可用（显式再分发）
     const fb = await post(`/api/sessions/${sess.id}/flowback`, {});
     assert.equal(fb.benchId, wbid);

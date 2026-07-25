@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
+import { isProfile, isolationFor, imageArgsFor, buildProfileEnv, buildManifest, cleanupProfile } from './profile.js';
 
-// 只把白名单内的变量传给子进程——API key 等敏感变量默认全部隔离
+// 只把白名单内的变量传给子进程——API key 等敏感变量默认全部隔离。
+// 注意：生产路径已改走 buildProfileEnv（profile.js），这里保留仅供测试断言旧行为。
 export function buildEnv(whitelist, source = process.env) {
   const env = {};
   for (const k of whitelist) if (source[k] !== undefined) env[k] = source[k];
@@ -12,16 +14,18 @@ export function buildEnv(whitelist, source = process.env) {
 
 // 从 stream-json 输出中提取最终文本：type=result 事件优先，无则回退原文
 export function extractStreamText(raw) {
-  let text = '';
+  let resultText = '';
+  const agentParts = [];
   for (const line of raw.split('\n')) {
     const t = line.trim();
     if (!t.startsWith('{')) continue;
     try {
       const ev = JSON.parse(t);
-      if (ev.type === 'result' && typeof ev.result === 'string') text = ev.result;
+      if (ev.type === 'result' && typeof ev.result === 'string') resultText = ev.result;
+      if (ev.type === 'item.completed' && ev.item?.type === 'agent_message' && typeof ev.item.text === 'string') agentParts.push(ev.item.text);
     } catch { /* 单行坏 JSON 忽略 */ }
   }
-  return text || raw.trim();
+  return resultText || agentParts.join('\n').trim() || raw.trim();
 }
 
 function parseOutput(mode, raw) {
@@ -61,16 +65,25 @@ export function extractChunkText(line, { toolMarkers = false } = {}) {
       }
       return parts.join('');
     }
+    if (ev.type === 'item.completed' && ev.item?.type === 'agent_message' && typeof ev.item.text === 'string') return ev.item.text;
+    if (toolMarkers && ev.type === 'item.started' && typeof ev.item?.type === 'string') {
+      const target = ev.item.command ?? ev.item.path ?? '';
+      return `\n▸ ${ev.item.type}${target ? ' ' + String(target).slice(0, 160) : ''}\n`;
+    }
   } catch { /* 半行/坏行忽略，等缓冲齐 */ }
   return '';
 }
 
-// 从 stream-json 原始输出中提取会话 id（任一事件的 session_id 字段，取首个）
+// 从 JSONL 原始输出中提取会话 id：Claude=session_id；Codex thread.started=thread_id。
 export function extractSessionId(raw) {
   for (const line of raw.split('\n')) {
     const t = line.trim();
     if (!t.startsWith('{')) continue;
-    try { const j = JSON.parse(t); if (j.session_id) return j.session_id; } catch { /* 坏行忽略 */ }
+    try {
+      const j = JSON.parse(t);
+      if (j.session_id) return j.session_id;
+      if (j.type === 'thread.started' && j.thread_id) return j.thread_id;
+    } catch { /* 坏行忽略 */ }
   }
   return null;
 }
@@ -86,7 +99,23 @@ const AUTH_RE = /log ?in|auth|401|unauthorized|credential|expired/i;
 
 export async function runAgent(cfg, prompt, opts = {}) {
   const started = Date.now();
+  // 架构不变量：所有模型调用必须携带显式 profile（profile.js 铸造），没有 ambient 回退。
+  // 调用方也不能自带 env / cwd——环境与工作目录只能由 profile 层重新构造。
+  if (!isProfile(opts.profile)) throw new Error('runAgent: 缺少显式 context profile（用 makeProfile 创建）——拒绝 ambient 环境回退');
+  // 拒收非法调用时也要清理已铸 profile 的 scratch 目录，不留临时目录垃圾
+  const rejectWith = msg => { cleanupProfile(opts.profile); throw new Error(msg); };
+  if (opts.env !== undefined) rejectWith('runAgent: 不接受调用方传入 env——子进程环境由 profile 层构造');
+  if (opts.cwd !== undefined) rejectWith('runAgent: 不接受调用方传入 cwd——工作目录由 profile 的 cwdPolicy 决定');
+  const profile = opts.profile;
   let argv = [...cfg.command];
+  // 追加该引擎实测验证过的隔离参数（claude: setting-sources/strict-mcp；codex: ignore-user-config）
+  const iso = isolationFor(cfg, profile.cwdPolicy);
+  if (iso) argv.push(...iso.args);
+  // 图片附件：路径由调用层（服务端 uploads 目录）校验后传入，仅支持声明了 imageArgs 的引擎
+  if (Array.isArray(opts.images) && opts.images.length) {
+    const ia = imageArgsFor(cfg);
+    if (ia) for (const img of opts.images) argv.push(...ia.map(a => (typeof a === 'string' ? a.replaceAll('{IMAGE}', img) : a)));
+  }
   // argv 中 ~/ 前缀展开为用户主目录——让 agents.json 里的脚本路径跨机器可移植
   argv = argv.map(a => (typeof a === 'string' && /^~[/\\]/.test(a) ? path.join(homedir(), a.slice(1)) : a));
   let tmpDir = null;
@@ -94,6 +123,9 @@ export async function runAgent(cfg, prompt, opts = {}) {
   //（如 openclaw 的 --session-key roundtable-{NONCE}），保证 clean room 无记忆。
   const nonce = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   argv = argv.map(a => (typeof a === 'string' ? a.replaceAll('{NONCE}', nonce) : a));
+  // manifest 用的 argv 快照：在 prompt 注入 argv 之前截取——清单里不复制 prompt 正文
+  const manifestArgv = [...argv];
+  const childEnv = buildProfileEnv(cfg);
   if (cfg.input === 'file') {
     tmpDir = mkdtempSync(path.join(tmpdir(), 'roundtable-'));
     const f = path.join(tmpDir, 'prompt.md');
@@ -105,6 +137,7 @@ export async function runAgent(cfg, prompt, opts = {}) {
     // prompt 直接进 argv 的 CLI（openclaw -m / hermes -q）。Windows 命令行总长上限
     // 约 32767 字符，超限前显式报错，避免截断或诡异失败。
     if (process.platform === 'win32' && argv.join(' ').length + prompt.length > 30000) {
+      cleanupProfile(profile); // 早退也要清理 scratch 目录
       return { ok: false, error: 'prompt-too-long', text: '', raw: '', stderr: '', exitCode: null, durationMs: Date.now() - started };
     }
     if (argv.includes('{PROMPT}')) argv = argv.map(a => (a === '{PROMPT}' ? prompt : a));
@@ -114,14 +147,29 @@ export async function runAgent(cfg, prompt, opts = {}) {
     let out = '', err = '', settled = false;
     let timer;
     let onAbort;
-    const cleanup = () => { if (tmpDir) try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} };
+    const cleanup = () => {
+      if (tmpDir) try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      cleanupProfile(profile); // scratch 一次性目录用后即清；其余策略不清理
+    };
     const finish = r => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
+      const result = { raw: out, stderr: err, durationMs: Date.now() - started, ...r };
+      // 每次调用落一份机器可读装配清单（context manifest）——只含变量名/哈希，无凭证值
+      result.manifest = buildManifest({
+        profile, cfg, argv: manifestArgv, envNames: Object.keys(childEnv).sort(),
+        prompt, materials: opts.materials ?? null, capabilities: opts.capabilities ?? null, execThread: opts.execThread ?? null, result,
+      });
+      if (opts.manifestFile) {
+        try {
+          mkdirSync(path.dirname(opts.manifestFile), { recursive: true });
+          writeFileSync(opts.manifestFile, JSON.stringify(result.manifest, null, 2), 'utf8');
+        } catch { /* 清单落盘失败不影响调用结果（结果里仍带 manifest） */ }
+      }
       cleanup();
-      resolve({ raw: out, stderr: err, durationMs: Date.now() - started, ...r });
+      resolve(result);
     };
     let child;
     try {
@@ -137,9 +185,10 @@ export async function runAgent(cfg, prompt, opts = {}) {
       const [file, args] = isWinShimScript
         ? [process.env.COMSPEC ?? 'cmd.exe', ['/c', ...argv]]
         : [argv[0], argv.slice(1)];
+      // env 与 cwd 均由 profile 层重新构造——cfg.cwd（旧配置遗留字段）在此被忽略
       child = spawn(file, args, {
-        env: buildEnv(cfg.envWhitelist),
-        cwd: cfg.cwd,
+        env: childEnv,
+        cwd: profile.cwd,
         shell: false,
         windowsHide: true,
       });
@@ -181,10 +230,11 @@ export async function runAgent(cfg, prompt, opts = {}) {
         const auth = AUTH_RE.test(err + out);
         return finish({ ok: false, error: auth ? 'auth' : 'exit:' + code, text: out, exitCode: code });
       }
+      const sessionId = extractSessionId(out);
       finish({
         ok: true, text: applyDropLines(parseOutput(cfg.output, out), cfg.dropLines), exitCode: 0,
-        // stream-json 输出的 CLI（claude）自带会话 id——供「会话续接」复用其原生记忆
-        ...(cfg.output === 'stream-json' ? { sessionId: extractSessionId(out) } : {}),
+        // Claude stream-json 与 Codex exec --json 都带原生线程 id，供受控续接复用。
+        ...(sessionId ? { sessionId } : {}),
       });
     });
     // 子进程未读完 stdin 即退出时会在 stdin 侧 emit 'error'（EPIPE/EOF）；

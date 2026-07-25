@@ -1,5 +1,5 @@
 // 可控 mock CLI：按 prompt 首行指令行为，供全部测试复用
-const { readFileSync } = require('node:fs');
+const { readFileSync, writeFileSync, appendFileSync } = require('node:fs');
 
 // 测试可控延迟：存在 MOCK_DELAY_MS 时先睡再回显，默认 0 不影响其他测试
 const delay = Number(process.env.MOCK_DELAY_MS ?? 0);
@@ -13,6 +13,21 @@ if (process.argv[2] === '--from-file') {
 let input = '';
 process.stdin.on('data', d => (input += d));
 process.stdin.on('end', () => {
+  // 执行线程测试模式：可写一个隔离副本文件、记录实收字节/argv，并吐 Claude/Codex 原生线程事件。
+  if (process.env.MOCK_SESSION_MODE) {
+    const sessionId = process.env.MOCK_SESSION_ID || 'mock-session-0001';
+    if (process.env.MOCK_WRITE_FILE) writeFileSync(process.env.MOCK_WRITE_FILE, process.env.MOCK_WRITE_CONTENT || 'mock managed output');
+    if (process.env.MOCK_CAPTURE_FILE) appendFileSync(process.env.MOCK_CAPTURE_FILE, JSON.stringify({ argv: process.argv.slice(2), input }) + '\n');
+    const answer = process.env.MOCK_AGENT_TEXT || 'managed execution result';
+    if (process.env.MOCK_SESSION_MODE === 'codex') {
+      process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: sessionId }) + '\n');
+      process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: answer } }) + '\n');
+    } else {
+      process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId }) + '\n');
+      process.stdout.write(JSON.stringify({ type: 'result', session_id: sessionId, result: answer }) + '\n');
+    }
+    process.exit(0);
+  }
   // 测试可控固定输出：存在 MOCK_FIXED_OUTPUT 时忽略 stdin 内容，恒定输出该值
   // （用于构造"摘要内容与轮次无关"的场景，如假收敛守卫测试）
   if (process.env.MOCK_FIXED_OUTPUT !== undefined) {
@@ -57,6 +72,7 @@ process.stdin.on('end', () => {
     process.stdout.write(String(process.env[first.split(/\s+/)[1]] ?? '<unset>'));
     process.exit(0);
   }
+  if (first === '#cwd') { process.stdout.write(process.cwd()); process.exit(0); }
   if (first === '#echo') { process.stdout.write(rest); process.exit(0); }
   setTimeout(() => {
     process.stdout.write(input);

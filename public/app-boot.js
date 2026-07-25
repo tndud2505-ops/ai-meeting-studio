@@ -5,6 +5,33 @@ let appBootActiveModalClose = null;
 
 async function boot() {
   applyI18n(); // 先按当前语言渲染所有静态文本（data-i18n 属性）
+  const themeButton = $('#themeToggle');
+  if (themeButton) {
+    const renderThemeButton = () => {
+      const currentTheme = document.documentElement.dataset.theme === 'light' || document.documentElement.dataset.theme === 'dark'
+        ? document.documentElement.dataset.theme
+        : 'auto';
+      const nextTheme = currentTheme === 'auto' ? 'light' : currentTheme === 'light' ? 'dark' : 'auto';
+      themeButton.textContent = t(`theme.${currentTheme}`);
+      themeButton.title = `${t('theme.toggleTitle')} → ${t(`theme.${nextTheme}`)}`;
+      themeButton.setAttribute('aria-label', themeButton.title);
+    };
+    themeButton.onclick = () => {
+      const currentTheme = document.documentElement.dataset.theme === 'light' || document.documentElement.dataset.theme === 'dark'
+        ? document.documentElement.dataset.theme
+        : 'auto';
+      const nextTheme = currentTheme === 'auto' ? 'light' : currentTheme === 'light' ? 'dark' : 'auto';
+      if (nextTheme === 'auto') {
+        try { localStorage.removeItem('rt-theme'); } catch {}
+        delete document.documentElement.dataset.theme;
+      } else {
+        try { localStorage.setItem('rt-theme', nextTheme); } catch {}
+        document.documentElement.dataset.theme = nextTheme;
+      }
+      renderThemeButton();
+    };
+    renderThemeButton();
+  }
   bindFolderBrowseButtons();
   bindWorkspacePathInputs();
   try {
@@ -22,6 +49,10 @@ async function boot() {
   $('#summ').innerHTML = opts('summarizer');
   $('#tpl').innerHTML = Object.entries(cfg.templates).map(([n, t]) => `<option value="${n}">${localizeField(t.title)}</option>`).join('');
   $('#tpl').addEventListener('change', renderTemplatePreview);
+  // 能力模板选择器（会议+工作台两处）：显式选择即授权；默认 basic_strategy，绝不按议题预选
+  const capOpts = Object.entries(cfg.capTemplates ?? {}).map(([tid, t]) =>
+    `<option value="${tid}"${tid === 'basic_strategy' ? ' selected' : ''}>${localizeField(t.title)}</option>`).join('');
+  for (const sel of ['#capTpl', '#wbCapTpl']) { if ($(sel)) $(sel).innerHTML = capOpts; }
   renderTemplatePreview();
   $('#staleBanner').hidden = !cfg.stale; // 前端新后端旧 → 常驻横幅提醒重启
   renderAgentStatus();

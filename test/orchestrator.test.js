@@ -7,7 +7,7 @@ import { Committee, extractDisagreementBlock } from '../src/orchestrator.js';
 
 // mock-cli 默认回显输入 → 辩手输出 = 简报原文，正好用来断言简报内容
 const AGENT = name => ({
-  name, command: [process.execPath, 'test/mock-cli.cjs'], input: 'stdin', output: 'text',
+  name, command: [process.execPath, path.resolve('test/mock-cli.cjs')], input: 'stdin', output: 'text',
   timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT'], cwd: process.cwd(), roles: ['debater', 'judge', 'summarizer'],
 });
 
@@ -36,6 +36,10 @@ test('chunk 与 agent-status 事件携带 label（供前端按角色路由）', 
   assert.ok(summaryChunk, 'summarizer 的 chunk 也应带 label r1summary');
   const status = events.find(e => e.type === 'agent-status');
   assert.ok(status.label);
+  // 发言级回流：每位辩手完成即广播 statement（书记/仲裁不发——它们各有专属回流管道）
+  const stmts = events.filter(e => e.type === 'statement');
+  assert.deepEqual(stmts.map(s => s.agentId).sort(), ['a', 'b']);
+  assert.ok(stmts.every(s => s.round === 1 && s.name && s.data.length > 0));
 });
 
 test('第 1 轮是 clean room：双方简报互不含对方内容', async () => {
@@ -145,8 +149,8 @@ test('stopRound 中止并回退轮次', async () => {
   await c.init();
   await c.runNextRound();
   // 用慢速 mock 制造可中断的一轮：MOCK_DELAY_MS 让子进程先睡再回显，确保 stopRound 能在其完成前触发 abort
-  c.agents.a.envWhitelist = ['PATH', 'SYSTEMROOT', 'MOCK_DELAY_MS'];
-  c.agents.b.envWhitelist = ['PATH', 'SYSTEMROOT', 'MOCK_DELAY_MS'];
+  c.agents.a.env = { MOCK_DELAY_MS: null };
+  c.agents.b.env = { MOCK_DELAY_MS: null };
   process.env.MOCK_DELAY_MS = '3000';
   try {
     const p = c.runNextRound();
@@ -170,11 +174,16 @@ test('savePartial 落盘半成品', async () => {
   assert.ok(readdirSync(c.dir).includes('session.md'));
 });
 
-test('runAuto 达到 maxRounds 后自动裁决', async () => {
-  const { c } = makeCommittee({ maxRounds: 2, mode: 'auto' });
+test('runAuto 只跑轮次绝不自动裁决：跑满后停在 paused 并明示下一步（裁决由用户显式触发）', async () => {
+  const { c, events } = makeCommittee({ maxRounds: 2, mode: 'auto' });
   await c.init();
   await c.runAuto();
   assert.equal(c.round, 2);
+  assert.equal(c.state, 'paused', '自动跑完应停在暂停态，不得自动进入裁决');
+  assert.ok(!events.some(e => e.type === 'agent-status' && e.label === 'judge'), '仲裁不应被自动调用');
+  assert.ok(events.some(e => e.type === 'sys' && /进入裁决/.test(e.data)), '应明示用户下一步选项');
+  // 显式触发裁决仍然可用
+  await c.runJudge();
   assert.equal(c.state, 'done');
 });
 
@@ -184,7 +193,7 @@ test('runAuto 假收敛守卫：分歧块恒为空时不误判收敛，跑满 ma
   // 因此 extractDisagreementBlock 每轮都返回 ''。旧判定 `s1 && s2 && b1===b2` 会在
   // 第 2 轮末因 ''===''（且 s1/s2 非空）误判"收敛"而提前 break；新判定要求 b1、b2 非空才收敛，
   // 应正确跑满 3 轮。
-  c.agents.s.envWhitelist = ['PATH', 'SYSTEMROOT', 'MOCK_FIXED_OUTPUT'];
+  c.agents.s.env = { MOCK_FIXED_OUTPUT: null };
   process.env.MOCK_FIXED_OUTPUT = '- 当前共识：无实质进展\n- 已证实事实：无';
   try {
     await c.init();
@@ -193,7 +202,21 @@ test('runAuto 假收敛守卫：分歧块恒为空时不误判收敛，跑满 ma
     delete process.env.MOCK_FIXED_OUTPUT;
   }
   assert.equal(c.round, 3, '守卫应生效：不应在空分歧块上假收敛提前 break');
-  assert.equal(c.state, 'done');
+  assert.equal(c.state, 'paused'); // 跑满同样停在暂停态等用户
+});
+
+test('Committee.resume 保留 workspace：恢复后 saveMeta 不抹掉挂载信息', async () => {
+  const { c } = makeCommittee();
+  await c.init();
+  const c2 = Committee.resume({
+    topic: c.topic, materials: '', agents: c.agents, roles: c.roles, template: c.template,
+    mode: c.mode, maxRounds: c.maxRounds, baseDir: c.baseDir, dir: c.dir,
+    round: 0, history: [], workspace: 'C:/some/mounted/dir',
+  });
+  assert.equal(c2.workspace, 'C:/some/mounted/dir');
+  await c2.saveMeta('paused');
+  const meta = JSON.parse(readFileSync(path.join(c.dir, 'metadata.json'), 'utf8'));
+  assert.equal(meta.workspace, 'C:/some/mounted/dir');
 });
 
 test('interject 追加而非覆盖：轮间多次插话都进下一轮简报', () => {
@@ -347,7 +370,7 @@ test('chat：created 状态（尚无内容）下调用抛错', async () => {
 test('书记输出缺「分歧分类表」结构时发出格式警告', async () => {
   const { c, events } = makeCommittee();
   // 让书记（agent s）输出固定文本（不含分歧分类表结构）
-  c.agents.s.envWhitelist = ['PATH', 'SYSTEMROOT', 'MOCK_FIXED_OUTPUT'];
+  c.agents.s.env = { MOCK_FIXED_OUTPUT: null };
   process.env.MOCK_FIXED_OUTPUT = '这是一段没有结构的摘要';
   try {
     await c.init();

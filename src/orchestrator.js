@@ -1,14 +1,24 @@
 import { runAgent } from './runner.js';
+import { makeProfile } from './profile.js';
+import { compileCaps, disciplineBlock, capsManifest, DEFAULT_TEMPLATE } from './capabilities.js';
 import { buildDebaterR1, buildDebaterRN, buildSummarizer, buildJudge, SCRIBE_MARKERS } from './prompts.js';
 import { resolveInjection, expandHome } from './templates.js';
 import { redact } from './redactor.js';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import * as store from './store.js';
 
+// 聊天→会议跨界事件的合法类型（v1 冻结枚举）。事件只能来自受信 UI/API 的结构化字段，
+// host 绝不从聊天/材料/模型文本里解析这类控制信息。
+export const CROSSOVER_TYPES = ['supplement_material', 'correct_fact', 'answer_question', 'change_goal_or_constraint'];
+
 export class Committee {
-  constructor({ topic, materials, agents, roles, template, mode, maxRounds, baseDir, emit, origin = '', lang = 'zh' }) {
-    Object.assign(this, { topic, materials, agents, roles, template, mode, maxRounds, baseDir, origin, lang }); // origin=来源工作台目录名；lang=会话语言（发给模型的提示词按此选中英文）
+  constructor({ topic, materials, agents, roles, template, mode, maxRounds, baseDir, emit, origin = '', lang = 'zh', workspace = '', caps = null, capConfig = null, capFiles = null }) {
+    Object.assign(this, { topic, materials, agents, roles, template, mode, maxRounds, baseDir, origin, lang, workspace }); // origin=来源工作台目录名；lang=会话语言（发给模型的提示词按此选中英文）
+    // 能力授权（v1）：模板只来自用户显式选择或来源工作台的既有授权（升格继承）——绝不从议题猜。
+    // 辩手/书记/仲裁共用这同一份授权状态；纪律注入走 call() 单一漏斗，任何角色无法私自扩权。
+    this.capState = { templateId: caps?.templateId ?? DEFAULT_TEMPLATE, grants: caps?.grants ?? [] };
+    this.caps = compileCaps({ templateId: this.capState.templateId, grants: this.capState.grants, config: capConfig ?? undefined, files: capFiles ?? undefined });
     this.emit = emit ?? (() => {});
     this.state = 'created';
     this.round = 0;
@@ -20,17 +30,32 @@ export class Committee {
     this.autoStopRequested = false;
     this.chatLog = [];
     this.chatSeq = 0;
+    // 跨界交接状态（v1）：事件队列 + 会议状态版本 + 裁决新鲜度/版本表。全部随 meta 持久化。
+    this.crossovers = []; // {id,type,text,sourceSeq,sourceBench,source,createdAt,plannedPhase,status,confirmations,appliedRound?,recipients?}
+    this.stateVersion = 1; // 每次批准更新真正注入下一阶段时 +1
+    this.verdictStatus = null; // null|'current'|'possibly_stale'（可能过期标记绝不静默消失）
+    this.verdictVersions = []; // {version, at, round, status:'current'|'superseded', file}
   }
 
   // 从磁盘状态装配一个可继续辩论的 Committee：不新建目录（复用给定 dir），
   // 直接注入 round/history，state 置为 paused。调用方随后应 saveMeta('paused') 刷新磁盘状态。
-  static resume({ topic, materials, agents, roles, template, mode, maxRounds, baseDir, emit, dir, round, history, origin = '', lang = 'zh' }) {
-    const c = new Committee({ topic, materials, agents, roles, template, mode, maxRounds, baseDir, emit, origin, lang });
+  // workspace 必须随恢复带回：否则下一次 saveMeta 会把挂载信息抹掉，
+  // 再恢复时静默降级为 scratch（实测故障——manifest 与 metadata 出现矛盾）
+  static resume({ topic, materials, agents, roles, template, mode, maxRounds, baseDir, emit, dir, round, history, origin = '', lang = 'zh', workspace = '', caps = null, capFiles = null }) {
+    const c = new Committee({ topic, materials, agents, roles, template, mode, maxRounds, baseDir, emit, origin, lang, workspace, caps, capFiles });
     c.dir = dir;
     c.round = round;
     c.history = history;
     c.state = 'paused';
     return c;
+  }
+
+  // 跨界交接状态随恢复带回（老会话无这些字段则用构造器默认值）
+  restoreCrossoverState(meta = {}) {
+    this.crossovers = Array.isArray(meta.crossovers) ? meta.crossovers : [];
+    this.stateVersion = Number(meta.stateVersion) || 1;
+    this.verdictStatus = meta.verdictStatus ?? null;
+    this.verdictVersions = Array.isArray(meta.verdictVersions) ? meta.verdictVersions : [];
   }
 
   setState(s) { this.state = s; this.emit({ type: 'state', data: s }); }
@@ -67,8 +92,87 @@ export class Committee {
     await store.saveMetadata(this.dir, {
       status, topic: this.topic, template: this.template.name, roles: this.roles,
       mode: this.mode, maxRounds: this.maxRounds, rounds: this.round, workspace: this.workspace, origin: this.origin, lang: this.lang,
+      caps: this.capState, // 能力授权状态（模板+本场授权）随会议持久化
+      crossovers: this.crossovers, stateVersion: this.stateVersion,
+      verdictStatus: this.verdictStatus, verdictVersions: this.verdictVersions,
       agents: this.agents, errors: this.errors, updatedAt: new Date().toISOString(),
     });
+  }
+
+  // ---- 聊天 ↔ 会议跨界交接（v1）----
+  // 事件只能由受信 UI/API 用结构化字段创建；任何轮次运行中都只进队列，绝不进当前轮上下文。
+  async addCrossover({ type, text, sourceSeq = null, sourceBench = '' }) {
+    if (!CROSSOVER_TYPES.includes(type)) throw new Error(this.tr(`未知跨界事件类型: ${type}`, `Unknown crossover type: ${type}`));
+    const body = String(text ?? '').trim();
+    if (!body) throw new Error(this.tr('内容不能为空', 'Content must not be empty'));
+    const ev = {
+      id: 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      type, text: body, sourceSeq, sourceBench, source: 'workbench-ui',
+      createdAt: new Date().toISOString(),
+      targetMeeting: path.basename(this.dir ?? ''),
+      plannedPhase: 'next-round',
+      status: 'pending', confirmations: [],
+    };
+    this.crossovers.push(ev);
+    this.emit({ type: 'crossover', data: this.crossoverSummary() });
+    await this.saveMeta(this.state);
+    return ev;
+  }
+
+  // 批准/拒绝：只在非运行状态可操作（轮末暂停时确认——对称注入的前提）
+  async resolveCrossover(id, approve) {
+    if (['running', 'judging'].includes(this.state)) throw new Error(this.tr('当前轮进行中，轮末再确认待纳入更新', 'A round is in progress — confirm pending updates at the round boundary'));
+    const ev = this.crossovers.find(x => x.id === id);
+    if (!ev) throw new Error(this.tr('事件不存在', 'No such event'));
+    if (ev.status !== 'pending') throw new Error(this.tr('该事件已处理过', 'Event already resolved'));
+    ev.status = approve ? 'approved' : 'rejected';
+    ev.confirmations.push({ by: 'user', action: ev.status, at: new Date().toISOString() });
+    // 保守重审规则：更正事实/改目标一经批准，已有裁决立刻标记可能过期（绝不静默保持有效）
+    if (approve && ['correct_fact', 'change_goal_or_constraint'].includes(ev.type) && this.verdictVersions.length) {
+      this.verdictStatus = 'possibly_stale';
+      this.emit({ type: 'verdict-status', data: { status: this.verdictStatus } });
+    }
+    this.emit({ type: 'crossover', data: this.crossoverSummary() });
+    await this.saveMeta(this.state);
+    return ev;
+  }
+
+  crossoverSummary() {
+    return {
+      pending: this.crossovers.filter(x => x.status === 'pending').map(({ id, type, text, createdAt }) => ({ id, type, text: text.slice(0, 400), createdAt })),
+      approvedUnapplied: this.crossovers.filter(x => x.status === 'approved' && !x.appliedRound).length,
+      stateVersion: this.stateVersion,
+      verdictStatus: this.verdictStatus,
+    };
+  }
+
+  // 已批准未注入的事件 → 渲染为下一阶段的对称注入块（辩手双方一字不差同一份）
+  #consumeApprovedCrossovers() {
+    const ready = this.crossovers.filter(x => x.status === 'approved' && !x.appliedRound);
+    if (!ready.length) return '';
+    const typeLabel = {
+      supplement_material: this.tr('补充材料', 'Supplementary material'),
+      correct_fact: this.tr('更正事实', 'Fact correction'),
+      answer_question: this.tr('回答会议提问', 'Answer to the meeting'),
+      change_goal_or_constraint: this.tr('目标/约束变更', 'Goal/constraint change'),
+    };
+    const parts = ready.map(ev => {
+      const note = ev.type === 'supplement_material'
+        ? this.tr('（注意：此前各轮结论形成于该材料加入之前）', '(note: earlier conclusions were formed before this material was added)')
+        : ev.type === 'correct_fact' || ev.type === 'change_goal_or_constraint'
+          ? this.tr('（注意：以此为准，此前与之冲突的前提作废）', '(note: this supersedes any conflicting earlier premise)')
+          : '';
+      return `[${typeLabel[ev.type]}]${note}\n${ev.text}`;
+    });
+    const round = this.round + 1; // 调用点在 runNextRound 自增前
+    for (const ev of ready) {
+      ev.appliedRound = round;
+      ev.recipients = [...this.roles.debaters];
+      ev.status = 'applied';
+    }
+    this.stateVersion += 1;
+    this.emit({ type: 'crossover', data: this.crossoverSummary() });
+    return this.tr(`【用户确认的跨界更新（会议状态版本 v${this.stateVersion}）】\n`, `[User-confirmed crossover updates (meeting state v${this.stateVersion})]\n`) + parts.join('\n\n');
   }
 
   tr(zh, en) { return this.lang === 'en' ? en : zh; }
@@ -102,9 +206,26 @@ export class Committee {
   }
 
   async call(agentId, label, prompt) {
+    // 本场纪律统一在这里前置：call() 是辩手/书记/仲裁的唯一漏斗，
+    // 所有控制链角色因此共享同一份授权装配，任何角色无法私自获得额外能力。
+    prompt = disciplineBlock(this.caps, this.lang) + prompt;
     await store.savePrompt(this.dir, label, agentId, prompt);
     this.emit({ type: 'agent-status', agentId, label, data: 'running' });
-    const r = await runAgent(this.agents[agentId], prompt, {
+    const cfg = this.agents[agentId];
+    // 辩手/书记/仲裁全部走同一隔离入口：挂载了工作区就是只读材料策略，否则干净房 scratch
+    const r = await runAgent(cfg, prompt, {
+      profile: makeProfile({
+        id: `committee:${label}:${agentId}`, role: label,
+        cwdPolicy: cfg.contextRoot ? 'readonly-materials' : 'scratch',
+        ...(cfg.contextRoot ? { root: cfg.contextRoot } : {}),
+      }),
+      manifestFile: path.join(this.dir, 'manifests', `${label}-${agentId}.context_manifest.json`),
+      capabilities: capsManifest(this.caps),
+      // 跨界交接审计：事件全量（原文+状态+确认记录+注入轮次+接收者）、状态版本、裁决新鲜度
+      materials: {
+        crossovers: this.crossovers, stateVersion: this.stateVersion,
+        verdictStatus: this.verdictStatus, verdictVersions: this.verdictVersions,
+      },
       onChunk: s => this.emit({ type: 'chunk', agentId, label, data: s }),
       signal: this.abort?.signal,
     });
@@ -115,11 +236,20 @@ export class Committee {
       this.emit({ type: 'error', agentId, label, data: r.error });
     }
     this.emit({ type: 'agent-status', agentId, label, data: r.ok ? 'done' : 'failed:' + r.error });
+    // 辩手发言完成即广播全文：回流不等整轮、不等书记、更不等裁决——
+    // 半途离会回到对话时，已说出口的内容一段都不少（统一容器回流铁律）
+    if (r.ok && /^r\d+$/.test(label) && this.roles.debaters.includes(agentId)) {
+      this.emit({ type: 'statement', round: Number(label.slice(1)), agentId, name: this.agentName(agentId), data: r.text });
+    }
     return r;
   }
 
   async runNextRound() {
     if (!['created', 'paused'].includes(this.state)) throw new Error(this.tr('当前状态不能开始新一轮: ', 'Cannot start a new round in state: ') + this.state);
+    // 已批准的跨界更新在轮次边界统一注入：走 userNote（主持人）通道——双方简报天然拿到
+    // 同一份全文，杜绝"一方先看到"的不对称。运行中新到的事件只进队列，不影响本轮。
+    const xoverBlock = this.#consumeApprovedCrossovers();
+    if (xoverBlock) this.userNote = this.userNote ? xoverBlock + '\n' + this.userNote : xoverBlock;
     this.round += 1;
     this.abort = new AbortController();
     this.setState('running');
@@ -256,6 +386,18 @@ export class Committee {
 
   requestAutoStop() { this.autoStopRequested = true; }
 
+  // 全体重审：在保存历史的前提下产出新的裁决版本（不是重放历史轮次）。
+  // 只能由用户显式触发；不重审时 possibly_stale 标记持续存在，绝不静默恢复有效。
+  async rejudge() {
+    if (!this.verdictVersions.length) throw new Error(this.tr('尚无裁决，无从重审——请先「进入裁决」', 'No verdict yet — run "Go to verdict" first'));
+    if (['running', 'judging'].includes(this.state)) throw new Error(this.tr('当前有轮次或裁决在进行中', 'A round or verdict is already in progress'));
+    this.crossovers.push({
+      id: 'rj' + Date.now().toString(36), type: 'rejudge-requested', text: '', source: 'workbench-ui',
+      createdAt: new Date().toISOString(), status: 'applied', confirmations: [{ by: 'user', action: 'rejudge', at: new Date().toISOString() }],
+    });
+    return await this.runJudge();
+  }
+
   // 摘要失败（如书记 agent 出错）后重跑本轮摘要——换新 AbortController，避免复用已 spent 的信号
   async resummarize() {
     if (!this.history.length) throw new Error(this.tr('尚无可重新摘要的轮次', 'No round to re-summarize yet'));
@@ -266,14 +408,20 @@ export class Committee {
 
   async runAuto() {
     this.autoStopRequested = false;
+    let converged = false;
     while (this.round < this.maxRounds && !this.autoStopRequested) {
       const entry = await this.runNextRound();
       if (!entry) return; // 被 stopRound 中止
       const [s1, s2] = [this.history.at(-2)?.summary, this.history.at(-1)?.summary];
       const b1 = extractDisagreementBlock(s1 ?? ''), b2 = extractDisagreementBlock(s2 ?? '');
-      if (b1 && b2 && b1 === b2) break; // 分歧收敛（双方分歧块非空且一致才算收敛，防止双空块假收敛）
+      if (b1 && b2 && b1 === b2) { converged = true; break; } // 分歧收敛（双方分歧块非空且一致才算收敛，防止双空块假收敛）
     }
-    if (!this.autoStopRequested) await this.runJudge();
+    // 「自动跑完」只跑轮次，绝不自动进入裁决——裁决是用户的拍板动作（分歧不默判），
+    // 且要花一次真实仲裁额度。跑完停在暂停态，明示下一步由用户选择（实测故障修复）。
+    if (this.autoStopRequested) return;
+    this.emit({ type: 'sys', data: converged
+      ? this.tr(`第 ${this.round} 轮后双方分歧已收敛。你可以点「进入裁决」产出裁决卡，或继续追问/插话`, `Disagreements converged after round ${this.round}. Hit "Go to verdict" to produce the verdict card, or keep probing/interjecting`)
+      : this.tr(`已自动跑完 ${this.round} 轮。你可以点「进入裁决」产出裁决卡、增加轮数继续，或先插话再战`, `Auto-run finished ${this.round} rounds. Hit "Go to verdict" for the verdict card, raise the round cap to continue, or interject first`) });
   }
 
   async runJudge() {
@@ -290,8 +438,18 @@ export class Committee {
     });
     const r = await this.call(this.roles.judge, 'judge', prompt);
     if (r.ok) {
+      // 裁决版本化：旧卡改名归档（judge-card-vN.md），新卡成为当前版；历史绝不覆盖
+      if (this.verdictVersions.length) {
+        const prev = this.verdictVersions.at(-1);
+        const archived = `judge-card-v${prev.version}.md`;
+        try { await rename(path.join(this.dir, 'judge-card.md'), path.join(this.dir, archived)); prev.file = archived; } catch { /* 旧卡文件缺失不阻塞新裁决 */ }
+        prev.status = 'superseded';
+      }
+      this.verdictVersions.push({ version: this.verdictVersions.length + 1, at: new Date().toISOString(), round: this.round, status: 'current', file: 'judge-card.md' });
+      this.verdictStatus = 'current'; // 重审完成/首次裁决：过期标记只有在这里（真实重审）才解除
       await store.saveJudgeCard(this.dir, r.text);
       this.emit({ type: 'judge-card', data: r.text });
+      this.emit({ type: 'verdict-status', data: { status: this.verdictStatus, version: this.verdictVersions.at(-1).version } });
       // 若模板设置了 copyJudgeCardTo，则额外落盘一份到该目录
       if (this.template.copyJudgeCardTo) {
         const dest = expandHome(this.template.copyJudgeCardTo);

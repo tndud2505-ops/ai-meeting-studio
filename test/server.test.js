@@ -49,7 +49,7 @@ test('首次启动从同目录 agents.example.json 生成用户配置并正常�
   const bootAgent = {
     boot: {
       name: 'Boot Agent',
-      command: [process.execPath, 'test/mock-cli.cjs'],
+      command: [process.execPath, path.resolve('test/mock-cli.cjs')],
       input: 'stdin',
       output: 'text',
       timeoutMs: 5000,
@@ -323,11 +323,11 @@ test('auto 动作可携带 maxRounds 覆盖（自动跑完至多 N 轮）', asyn
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ maxRounds: 1 }),
   });
   let s = {};
-  for (let i = 0; i < 60 && s.state !== 'done'; i++) {
+  for (let i = 0; i < 60 && s.state !== 'paused'; i++) {
     await new Promise(r => setTimeout(r, 100));
     s = await (await fetch(`${BASE}/api/sessions/${create.id}`)).json();
   }
-  assert.equal(s.state, 'done');
+  assert.equal(s.state, 'paused'); // 自动跑完只跑轮次，停在暂停态等用户显式进入裁决
   assert.equal(s.round, 1);
 });
 
@@ -352,12 +352,12 @@ test('deriveSessionAgents：挂载工作区时切换 cwd 与只读工具集', as
   };
   const ws = 'C:/some/project';
   const derived = deriveSessionAgents(base, ['claude', 'codex'], ws);
-  assert.equal(derived.claude.cwd, ws);
-  assert.equal(derived.codex.cwd, ws);
+  assert.equal(derived.claude.contextRoot, ws); // 挂载即授权：调用层据此走 readonly-materials 策略
+  assert.equal(derived.codex.contextRoot, ws);
   assert.deepEqual(derived.claude.command, ['claude.cmd', '-p', '--disallowedTools', 'Bash,Edit,Write']); // 换成只读工具集
   assert.deepEqual(derived.codex.command, base.codex.command); // 无 workspaceArgs 的保持原样（沙箱本就只读）
   const noWs = deriveSessionAgents(base, ['claude'], '');
-  assert.equal(noWs.claude.cwd, 'workdir'); // 不挂载则一切照旧
+  assert.equal(noWs.claude.contextRoot, undefined); // 不挂载则无授权根目录（scratch 干净房）
   assert.deepEqual(noWs.claude.command, base.claude.command);
   noWs.claude.cwd = 'mutated';
   assert.equal(base.claude.cwd, 'workdir'); // 派生是深拷贝，不污染全局配置

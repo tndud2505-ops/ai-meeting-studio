@@ -4,6 +4,120 @@
 let roundDivs = {};
 const badgeTimers = {}; // 运行计时器：running 徽标每秒更新耗时
 let typingEls = {};     // agentId -> "正在输入…" 提示元素（群聊）
+let arenaSideMode = localStorage.getItem('rt-arena-side');
+if (arenaSideMode === '1') arenaSideMode = 'open';
+else if (arenaSideMode === '0') arenaSideMode = 'closed';
+else if (arenaSideMode !== 'closed' && arenaSideMode !== 'open' && arenaSideMode !== 'wide') {
+  arenaSideMode = window.matchMedia('(max-width: 900px)').matches ? 'closed' : 'open';
+}
+let arenaSideLastOpenMode = arenaSideMode === 'wide' ? 'wide' : 'open';
+let arenaSideUnread = 0;
+let arenaLastUserChatQ = '';
+
+function arenaSideIsNarrow() { return window.matchMedia('(max-width: 900px)').matches; }
+
+function renderArenaSideToggle() {
+  const btn = $('#arenaSideToggle');
+  if (!btn) return;
+  const label = btn.querySelector('.arena-side-toggle-label');
+  if (label) label.textContent = t('arena.sideToggle');
+  const expanded = arenaSideMode !== 'closed';
+  btn.setAttribute('aria-expanded', String(expanded));
+  const unreadText = t('arena.sideUnread', { n: arenaSideUnread });
+  let unread = btn.querySelector('.unread-badge');
+  if (!expanded && arenaSideUnread > 0) {
+    if (!unread) {
+      unread = document.createElement('span');
+      unread.className = 'unread-badge';
+      btn.appendChild(unread);
+    }
+    unread.textContent = String(arenaSideUnread);
+    unread.setAttribute('aria-label', unreadText);
+    btn.setAttribute('aria-label', t('arena.sideToggle') + ': ' + unreadText);
+  } else {
+    if (unread) unread.remove();
+    btn.setAttribute('aria-label', t('arena.sideToggle'));
+  }
+  const widen = $('#arenaSideWiden');
+  if (widen) {
+    const wide = arenaSideMode === 'wide';
+    const title = t(wide ? 'arena.sideNarrow' : 'arena.sideWiden');
+    widen.textContent = wide ? '⤡' : '⤢';
+    widen.title = title;
+    widen.setAttribute('aria-label', title);
+    widen.setAttribute('aria-pressed', String(wide));
+  }
+}
+
+function arenaSideOnEscape(e) {
+  if (e.key !== 'Escape' || arenaSideMode === 'closed' || !arenaSideIsNarrow()) return;
+  toggleArenaSide(false);
+  $('#arenaSideToggle')?.focus();
+}
+
+function setArenaSideMode(mode) {
+  if (mode !== 'closed' && mode !== 'open' && mode !== 'wide') mode = 'closed';
+  arenaSideMode = mode;
+  if (arenaSideMode !== 'closed') arenaSideLastOpenMode = arenaSideMode;
+  const side = $('#arenaSide');
+  const scrim = $('#arenaScrim');
+  const expanded = arenaSideMode !== 'closed';
+  const drawerOpen = expanded && arenaSideIsNarrow();
+  side.hidden = !expanded;
+  side.classList.toggle('arena-side-drawer', arenaSideIsNarrow());
+  side.classList.toggle('arena-side-wide', arenaSideMode === 'wide');
+  side.setAttribute('aria-hidden', String(!expanded));
+  scrim.hidden = !drawerOpen;
+  scrim.setAttribute('aria-hidden', String(!drawerOpen));
+  if (expanded) {
+    arenaSideUnread = 0;
+    $('#arenaSideLive').textContent = '';
+  }
+  localStorage.setItem('rt-arena-side', arenaSideMode);
+  renderArenaSideToggle();
+  document.removeEventListener('keydown', arenaSideOnEscape);
+  if (drawerOpen) document.addEventListener('keydown', arenaSideOnEscape);
+}
+
+function toggleArenaSide(open) {
+  setArenaSideMode(open ? arenaSideLastOpenMode : 'closed');
+}
+
+function incrementArenaSideUnread() {
+  if (arenaSideMode !== 'closed') return;
+  arenaSideUnread += 1;
+  renderArenaSideToggle();
+  $('#arenaSideLive').textContent = t('arena.sideUnread', { n: arenaSideUnread });
+}
+
+function resetArenaSideUI() {
+  arenaSideUnread = 0;
+  arenaLastUserChatQ = '';
+  const saved = localStorage.getItem('rt-arena-side');
+  let savedMode = saved;
+  if (savedMode === '1') savedMode = 'open';
+  else if (savedMode === '0') savedMode = 'closed';
+  else if (savedMode !== 'closed' && savedMode !== 'open' && savedMode !== 'wide') {
+    savedMode = arenaSideIsNarrow() ? 'closed' : 'open';
+  }
+  if (savedMode !== 'closed') arenaSideLastOpenMode = savedMode;
+  setArenaSideMode(savedMode);
+}
+
+function appendArenaReplyAnchor(side, chatMessage) {
+  const q = arenaLastUserChatQ.split(/\r?\n/, 1)[0].trim().slice(0, 30);
+  if (!q) return;
+  const anchor = document.createElement('button');
+  anchor.type = 'button';
+  anchor.className = 'reply-anchor';
+  anchor.textContent = t('arena.replyAnchor', { q });
+  anchor.onclick = () => {
+    toggleArenaSide(true);
+    $('#chatPanel').open = true;
+    chatMessage.scrollIntoView({ block: 'center' });
+  };
+  feed(side).appendChild(anchor);
+}
 
 const api = (action, body) => fetch(`/api/sessions/${sid}/${action}`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}),
@@ -20,6 +134,9 @@ async function applyDraftFromHash() {
     $('#materials').value = d.materials ?? '';
     // 发起方建议的模板也一并选好（例如项目会诊）——模板选错会导致顾问输出结构完全不对题
     if (d.template && [...$('#tpl').options].some(o => o.value === d.template)) $('#tpl').value = d.template;
+    // 升格草稿继承来源工作台的能力模板与本场授权（会议与工作台共用同一份授权清单）
+    if (d.capTemplate && [...$('#capTpl').options].some(o => o.value === d.capTemplate)) $('#capTpl').value = d.capTemplate;
+    draftCapGrants = Array.isArray(d.capGrants) ? d.capGrants : [];
     if (d.workspace) $('#workspace').value = d.workspace;
     showSetup(); // 统一容器后默认落地页是建台页——草稿链路要显式切到会议表单
     draftOrigin = d.originBench ?? null;
@@ -148,6 +265,7 @@ function hideTyping(agentId) {
 
 // from: 'user' | agentId；全部经 textContent 渲染，杜绝模型/用户输出触发 XSS
 function appendChatMessage(from, name, text) {
+  const arenaReplySide = from !== 'user' ? sideOf[from] : null;
   hideTyping(from);
   const div = document.createElement('div');
   div.className = 'chat-msg ' + (from === 'user' ? 'chat-user' : 'chat-agent');
@@ -160,6 +278,7 @@ function appendChatMessage(from, name, text) {
   div.appendChild(nameEl);
   div.appendChild(bodyEl);
   $('#chatLog').appendChild(div);
+  if (arenaReplySide) appendArenaReplyAnchor(arenaReplySide, div);
   $('#chatLog').scrollTop = $('#chatLog').scrollHeight;
   $('#chatPanel').open = true; // 有新消息时自动展开
 }
@@ -229,7 +348,361 @@ function renderChatRecipients(roles, agentNames) {
   }
 }
 
+// ---- 决策侧栏：逐轮小结的只读解析与安全 DOM 渲染 ----
+const arenaRoundSummaryView = (() => {
+  const roundSectionKinds = [
+    { kind: 'consensus', labels: ['当前共识', 'Current consensus'], icon: '✓' },
+    { kind: 'disagreement', labels: ['分歧分类表', 'Disagreement table'], icon: '⇄' },
+    { kind: 'verified', labels: ['已证实事实', 'Verified facts'], icon: '▪' },
+    { kind: 'unverified', labels: ['未证实假设', 'Unverified assumptions'], icon: '?' },
+    { kind: 'kill', labels: ['证伪点', 'Kill conditions'], icon: '⚠' },
+    { kind: 'questions', labels: ['下一轮待问问题', 'Questions for next round'], icon: '→' },
+  ];
+  const judgeSectionKinds = [
+    { kind: 'consensus', labels: ['一致', 'Agreed conclusions'], icon: '✓' },
+    { kind: 'revision', labels: ['修正', 'Revisions accepted'], icon: '✎' },
+    { kind: 'disagreement', labels: ['遗留分歧', '分歧逐条处置', 'Disagreements, one by one'], icon: '⇄' },
+    { kind: 'kill', labels: ['证伪', 'Combined kill conditions'], icon: '⚠' },
+    { kind: 'action', labels: ['行动', '下一步', 'Action', 'Next step', 'Minimal verifiable next step'], icon: '→' },
+  ];
+  const roundProfile = { sectionKinds: roundSectionKinds, disagreementTable: true, emphasizeQuestions: true };
+  const judgeProfile = { sectionKinds: judgeSectionKinds, showYourCall: true };
+
+  function kindOf(title, profile) {
+    const normalized = title.toLocaleLowerCase();
+    return profile.sectionKinds.find(item => item.labels.some(label => normalized.includes(label.toLocaleLowerCase())))
+      ?? { kind: 'default', icon: '▪' };
+  }
+  // 公共纯函数：优先识别 ### 分节；完全没有 ### 时才识别顶层扁平节名。
+  function parseStructuredText(sourceText, skipLine) {
+    const source = String(sourceText ?? '');
+    const lines = source.split(/\r?\n/);
+    const hasMarkdownSections = lines.some(line => /^###\s+/.test(line));
+    const sections = [];
+    const preamble = [];
+    let current = null;
+
+    for (const line of lines) {
+      if (skipLine?.(line)) continue;
+      const match = hasMarkdownSections
+        ? /^###\s+(.+?)\s*$/.exec(line)
+        : /^- (.+?)[：:]\s*(.*)$/.exec(line);
+      if (match) {
+        current = { title: match[1], lines: [] };
+        if (!hasMarkdownSections && match[2]) current.lines.push(match[2]);
+        sections.push(current);
+      } else if (current) {
+        current.lines.push(line);
+      } else {
+        preamble.push(line);
+      }
+    }
+    return {
+      mode: hasMarkdownSections ? 'headings' : 'flat',
+      structured: sections.length >= 2,
+      preamble,
+      sections,
+    };
+  }
+
+  function parse(summaryText) {
+    return parseStructuredText(summaryText, line => line.startsWith('## Rolling Summary'));
+  }
+
+  function parseJudgeCard(cardText) {
+    return parseStructuredText(cardText);
+  }
+  function splitTableRow(line) {
+    let row = line.trim();
+    if (row.startsWith('|')) row = row.slice(1);
+    if (row.endsWith('|')) row = row.slice(0, -1);
+    return row.split('|').map(cell => cell.trim());
+  }
+
+  function isTableSeparator(cells) {
+    return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+  }
+
+  // 纯函数：只消费第一段连续竖线行；任一数据行少于四格即判整表失败。
+  function parseDisagreementTable(lines) {
+    const start = lines.findIndex(line => line.trimStart().startsWith('|'));
+    if (start < 0) return null;
+    let end = start;
+    while (end < lines.length && lines[end].trimStart().startsWith('|')) end += 1;
+
+    const rows = [];
+    let sawData = false;
+    for (let i = start; i < end; i += 1) {
+      const cells = splitTableRow(lines[i]);
+      if (isTableSeparator(cells)) continue;
+      const isHeader = !sawData && cells.some(cell => {
+        const label = cell.replaceAll('**', '').trim();
+        return label.includes('类型') || /^type$/i.test(label);
+      });
+      if (isHeader) continue;
+      if (cells.length < 4) return null;
+      rows.push(cells.length === 4
+        ? cells
+        : [cells[0], cells[1], cells[2], cells.slice(3).join(' | ')]);
+      sawData = true;
+    }
+
+    return rows.length ? { start, end, rows } : null;
+  }
+
+  // 纯函数：只有成对 ** 才转成 strong 片段；奇数个标记时逐字保留。
+  function inlineParts(text) {
+    const source = String(text ?? '');
+    const markerCount = source.match(/\*\*/g)?.length ?? 0;
+    if (!markerCount || markerCount % 2 !== 0) return [{ text: source, strong: false }];
+    return source.split('**').map((part, index) => ({ text: part, strong: index % 2 === 1 }));
+  }
+
+  function appendInline(target, text, emphasizeQuestion) {
+    const parts = inlineParts(text);
+    const visibleText = parts.map(part => part.text).join('');
+    const questionMatch = emphasizeQuestion
+      ? /^(\s*)(问\s+[^：:\n]+|Ask\s+[^:\n]+)(?=[：:])/i.exec(visibleText)
+      : null;
+    const questionStart = questionMatch ? questionMatch[1].length : -1;
+    const questionEnd = questionMatch ? questionStart + questionMatch[2].length : -1;
+    let offset = 0;
+
+    for (const part of parts) {
+      const partStart = offset;
+      const partEnd = partStart + part.text.length;
+      const cuts = [partStart, partEnd];
+      if (questionStart > partStart && questionStart < partEnd) cuts.push(questionStart);
+      if (questionEnd > partStart && questionEnd < partEnd) cuts.push(questionEnd);
+      cuts.sort((a, b) => a - b);
+      for (let i = 0; i < cuts.length - 1; i += 1) {
+        const start = cuts[i];
+        const end = cuts[i + 1];
+        if (end <= start) continue;
+        const segment = part.text.slice(start - partStart, end - partStart);
+        const questionStrong = questionMatch && start >= questionStart && end <= questionEnd;
+        if (part.strong || questionStrong) {
+          const strong = document.createElement('strong');
+          strong.textContent = segment;
+          target.appendChild(strong);
+        } else {
+          target.appendChild(document.createTextNode(segment));
+        }
+      }
+      offset = partEnd;
+    }
+  }
+
+  function renderRawLines(target, lines) {
+    for (const line of lines) {
+      const row = document.createElement('div');
+      row.className = line ? 'summary-line' : 'summary-line summary-line-empty';
+      row.textContent = line;
+      target.appendChild(row);
+    }
+  }
+
+  function renderSectionLines(target, lines, emphasizeQuestions) {
+    let list = null;
+    let lastItem = null;
+    let nestedList = null;
+    for (const line of lines) {
+      const nestedBullet = /^ {2,}[*-]\s+(.*)$/.exec(line);
+      if (nestedBullet && lastItem) {
+        if (!nestedList) {
+          nestedList = document.createElement('ul');
+          nestedList.className = 'summary-list summary-list-nested';
+          lastItem.appendChild(nestedList);
+        }
+        const nestedItem = document.createElement('li');
+        appendInline(nestedItem, nestedBullet[1], emphasizeQuestions);
+        nestedList.appendChild(nestedItem);
+        continue;
+      }
+
+      if (/^ {2,}\S/.test(line) && lastItem) {
+        lastItem.appendChild(document.createElement('br'));
+        const nested = document.createElement('span');
+        nested.className = 'summary-list-continuation';
+        appendInline(nested, line.trimStart(), emphasizeQuestions);
+        lastItem.appendChild(nested);
+        continue;
+      }
+
+      const ordered = /^\s*(\d+)\.\s+(.*)$/.exec(line);
+      const unordered = ordered ? null : /^\s*-\s+(.*)$/.exec(line);
+      if (ordered || unordered) {
+        const tag = ordered ? 'ol' : 'ul';
+        if (!list || list.tagName.toLowerCase() !== tag) {
+          list = document.createElement(tag);
+          list.className = 'summary-list';
+          if (ordered && Number(ordered[1]) !== 1) list.start = Number(ordered[1]);
+          target.appendChild(list);
+        }
+        lastItem = document.createElement('li');
+        nestedList = null;
+        appendInline(lastItem, ordered ? ordered[2] : unordered[1], emphasizeQuestions);
+        list.appendChild(lastItem);
+        continue;
+      }
+
+      list = null;
+      lastItem = null;
+      nestedList = null;
+      const paragraph = document.createElement('div');
+      paragraph.className = line ? 'summary-paragraph' : 'summary-paragraph summary-line-empty';
+      appendInline(paragraph, line, emphasizeQuestions);
+      target.appendChild(paragraph);
+    }
+  }
+
+  function renderDisagreementTable(parsedTable, title) {
+    const labels = [
+      t('arena.dtType'),
+      t('arena.dtIssue'),
+      t('arena.dtStances'),
+      t('arena.dtNext'),
+    ];
+    const table = document.createElement('div');
+    table.className = 'summary-dt';
+    table.setAttribute('role', 'table');
+    table.setAttribute('aria-label', title);
+
+    const head = document.createElement('div');
+    head.className = 'summary-dt-head';
+    head.setAttribute('role', 'row');
+    for (const label of labels) {
+      const cell = document.createElement('div');
+      cell.setAttribute('role', 'columnheader');
+      cell.textContent = label;
+      head.appendChild(cell);
+    }
+    table.appendChild(head);
+
+    for (const cells of parsedTable.rows) {
+      const row = document.createElement('div');
+      row.className = 'summary-dt-row';
+      row.setAttribute('role', 'row');
+      cells.forEach((text, index) => {
+        const cell = document.createElement('div');
+        cell.className = `summary-dt-cell summary-dt-cell-${index + 1}`;
+        cell.setAttribute('role', 'cell');
+        cell.setAttribute('data-label', labels[index]);
+        if (index === 0) {
+          const pill = document.createElement('span');
+          pill.className = 'summary-dt-type';
+          appendInline(pill, text, false);
+          cell.appendChild(pill);
+        } else {
+          appendInline(cell, text, false);
+        }
+        row.appendChild(cell);
+      });
+      table.appendChild(row);
+    }
+    return table;
+  }
+
+  function renderSection(section, profile) {
+    const semantic = kindOf(section.title, profile);
+    const wrapper = document.createElement('details');
+    wrapper.className = `summary-section summary-section-${semantic.kind}`;
+    wrapper.open = true;
+
+    const heading = document.createElement('summary');
+    heading.className = 'summary-section-title';
+    const icon = document.createElement('span');
+    icon.className = 'summary-section-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = semantic.icon;
+    const title = document.createElement('span');
+    title.className = 'summary-section-label';
+    title.textContent = section.title;
+    const dot = document.createElement('span');
+    dot.className = 'summary-section-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    heading.append(icon, title);
+    if (profile.showYourCall && (section.title.includes('拍板') || /(?:owner|user).*(?:decid|call)/i.test(section.title))) {
+      const yourCall = document.createElement('span');
+      yourCall.className = 'summary-your-call';
+      yourCall.textContent = t('arena.yourCall');
+      heading.appendChild(yourCall);
+    }
+    heading.appendChild(dot);
+    wrapper.appendChild(heading);
+
+    const body = document.createElement('div');
+    body.className = 'summary-section-body';
+    if (profile.disagreementTable && semantic.kind === 'disagreement') {
+      const parsedTable = parseDisagreementTable(section.lines);
+      if (!parsedTable) {
+        body.className += ' summary-lines summary-section-fallback';
+        renderRawLines(body, section.lines);
+      } else {
+        renderSectionLines(body, section.lines.slice(0, parsedTable.start), false);
+        body.appendChild(renderDisagreementTable(parsedTable, section.title));
+        renderSectionLines(body, section.lines.slice(parsedTable.end), false);
+      }
+    } else {
+      renderSectionLines(body, section.lines, profile.emphasizeQuestions && semantic.kind === 'questions');
+    }
+    wrapper.appendChild(body);
+    return wrapper;
+  }
+
+  function renderStructuredContent(content, parsed, source, profile, extraClass) {
+    content.className = [
+      'summary-content',
+      extraClass,
+      parsed.structured ? '' : 'summary-lines summary-fallback',
+    ].filter(Boolean).join(' ');
+    content.replaceChildren();
+
+    if (parsed.structured) {
+      if (parsed.preamble.some(line => line.trim())) {
+        const preamble = document.createElement('div');
+        preamble.className = 'summary-preamble summary-lines';
+        renderRawLines(preamble, parsed.preamble);
+        content.appendChild(preamble);
+      }
+      for (const section of parsed.sections) content.appendChild(renderSection(section, profile));
+    } else {
+      renderRawLines(content, source.split(/\r?\n/));
+    }
+  }
+
+  function render(roundSummary, roundNumber, summaryText) {
+    const source = String(summaryText ?? '');
+    const parsed = parse(source);
+    const roundHeading = document.createElement('summary');
+    roundHeading.textContent = t('arena.roundSummaryTitle', { n: roundNumber });
+    const content = document.createElement('div');
+    renderStructuredContent(content, parsed, source, roundProfile);
+
+    const raw = document.createElement('details');
+    raw.className = 'summary-raw';
+    const rawHeading = document.createElement('summary');
+    rawHeading.textContent = t('arena.viewRaw');
+    const rawText = document.createElement('pre');
+    rawText.textContent = source;
+    raw.append(rawHeading, rawText);
+    roundSummary.replaceChildren(roundHeading, content, raw);
+    return parsed;
+  }
+
+  function renderJudgeCard(judgeHost, cardText) {
+    const source = String(cardText ?? '');
+    const parsed = parseJudgeCard(source);
+    renderStructuredContent(judgeHost, parsed, source, judgeProfile, 'judge-structured');
+    return parsed;
+  }
+
+  return { parse, parseJudgeCard, parseDisagreementTable, inlineParts, render, renderJudgeCard };
+})();
+// ---- 决策侧栏逐轮小结渲染结束 ----
+
 function onEvent(ev) {
+  if (ev.type === 'summary' || ev.type === 'judge-card' || ev.type === 'verdict-status' || ev.type === 'crossover') incrementArenaSideUnread();
   if (ev.type === 'chunk') {
     const side = sideOf[ev.agentId];
     if (!side || !isDebaterCall(ev.label)) return; // 非辩手轮次（如同一 agent 兼任的 summarizer/judge）的流不进辩手栏
@@ -269,12 +742,49 @@ function onEvent(ev) {
   }
   if (ev.type === 'chat-message') appendChatMessage(ev.from, ev.name, ev.data);
   if (ev.type === 'summary') {
-    $('#summary').textContent = ev.data;
-    $('#resummarize').hidden = !/摘要失败|summary failed/.test(ev.data);
+    const summaryHost = $('#summary');
+    const priorRoundSummaries = [...summaryHost.children].filter(el => el.classList.contains('round-summary'));
+    const lastRoundNumber = priorRoundSummaries.reduce((max, el) => {
+      const n = Number(el.dataset.round);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, 0);
+    const roundNumber = Number.isFinite(ev.round) ? ev.round : lastRoundNumber + 1;
+    let roundSummary = priorRoundSummaries.find(el => el.dataset.round === String(roundNumber));
+    if (!roundSummary) {
+      roundSummary = document.createElement('details');
+      roundSummary.className = 'round-summary';
+      roundSummary.dataset.round = String(roundNumber);
+      summaryHost.appendChild(roundSummary);
+    }
+
+    const summaryText = String(ev.data ?? '');
+    arenaRoundSummaryView.render(roundSummary, roundNumber, summaryText);
+    for (const el of summaryHost.children) el.open = el === roundSummary;
+
+    const allRoundSummaries = [...summaryHost.children].filter(el => el.classList.contains('round-summary'));
+    const latestRound = allRoundSummaries[allRoundSummaries.length - 1];
+    const latestText = latestRound?.lastElementChild?.textContent ?? '';
+    $('#resummarize').hidden = !/摘要失败|summary failed/.test(latestText);
     if (denseMode) collapseRounds(); // 提炼物已就位，原文退场
   }
-  if (ev.type === 'round-done') { setStatebar(t('dyn.roundDone', { round: ev.round })); refreshSessionList(); }
-  if (ev.type === 'state') setStatebar(t('dyn.state', { data: ev.data }));
+  if (ev.type === 'sys') setStatebar(ev.data); // 编排层提示（如：自动跑完后的下一步指引）
+  if (ev.type === 'crossover') renderXoverQueue(ev.data);
+  if (ev.type === 'verdict-status') renderVerdictStatus(ev.data?.status ?? null);
+  if (ev.type === 'round-done') {
+    const pendingCount = lastXoverSummary?.pending?.length ?? 0;
+    setStatebar(pendingCount
+      ? t('xover.roundDonePending', { round: ev.round, n: pendingCount })
+      : t('dyn.roundDone', { round: ev.round }));
+    refreshSessionList();
+  }
+  if (ev.type === 'state') {
+    setStatebar(t('dyn.state', { data: ev.data }));
+    // 跑轮/裁决进行中禁用轮次控制——不给用户点出「当前状态不能开始新一轮」的机会
+    const busy = ev.data === 'running' || ev.data === 'judging';
+    for (const sel of ['#next', '#auto', '#dojudge']) { const el = $(sel); if (el) el.disabled = busy; }
+    meetingRunning = busy;
+    renderXoverQueue(lastXoverSummary); // 批准按钮随轮次运行态启停
+  }
   if (ev.type === 'error') {
     const hint = ev.data === 'auth' ? t('dyn.authHint') : '';
     const nm = ev.agentId ? (cfg.agents[ev.agentId]?.name ?? ev.agentId) : '';
@@ -282,7 +792,8 @@ function onEvent(ev) {
   }
   if (ev.type === 'judge-card') {
     $('#judgecard').hidden = false;
-    $('#judgecard pre').textContent = ev.data;
+    $('#judgeRaw').textContent = ev.data;
+    arenaRoundSummaryView.renderJudgeCard($('#judgeStructured'), ev.data);
     populateFlowbackTargets(); // 裁决已自动落回来源；投放面向任意工作台再分发
     refreshSessionList();
   }
@@ -327,16 +838,132 @@ function setBrief(topic, materials) {
   $('#briefDetails').open = false;
 }
 
+// ---- 跨界交接（聊天→会议）：待纳入队列 + 裁决新鲜度 ----
+let meetingRunning = false; // 由 state 事件维护：running/judging 时批准按钮禁用（轮末才确认）
+let lastXoverSummary = null; // 最近一次队列快照（state 变化时按新运行态重绘）
+
+function renderXoverQueue(summary) {
+  const box = $('#xoverQueue');
+  if (!box) return;
+  if (summary !== undefined) lastXoverSummary = summary;
+  const pending = lastXoverSummary?.pending ?? [];
+  box.hidden = !pending.length;
+  box.replaceChildren();
+  if (!pending.length) return;
+  const h = document.createElement('strong');
+  h.textContent = `${t('xover.queueTitle')}（${pending.length}）`;
+  box.appendChild(h);
+  if (pending.length >= 2) {
+    const approveAll = document.createElement('button');
+    const approveAllBusy = box.dataset.approveAllBusy === 'true';
+    approveAll.type = 'button';
+    approveAll.textContent = t('xover.approveAll');
+    approveAll.disabled = meetingRunning || approveAllBusy;
+    if (approveAllBusy) approveAll.setAttribute('aria-busy', 'true');
+    approveAll.onclick = async () => {
+      box.dataset.approveAllBusy = 'true';
+      approveAll.disabled = true;
+      approveAll.setAttribute('aria-busy', 'true');
+      let latestCrossover = lastXoverSummary;
+      for (const ev of pending) {
+        let r;
+        try {
+          const response = await api('crossover-resolve', { id: ev.id, approve: true });
+          if (!response) {
+            delete box.dataset.approveAllBusy;
+            renderXoverQueue(lastXoverSummary ?? latestCrossover);
+            return; // api 已报告网络错误；恢复剩余队列供重试
+          }
+          r = await response.json();
+        } catch (e) {
+          r = { error: t('dyn.netErr', { msg: e.message }) };
+        }
+        if (r.crossover) {
+          latestCrossover = r.crossover;
+          lastXoverSummary = r.crossover;
+        }
+        if (r.error) {
+          delete box.dataset.approveAllBusy;
+          renderXoverQueue(r.crossover ?? lastXoverSummary ?? latestCrossover);
+          setStatebar(r.error, true);
+          return;
+        }
+      }
+      delete box.dataset.approveAllBusy;
+      renderXoverQueue(latestCrossover);
+    };
+    box.append(document.createTextNode(' '), approveAll);
+  }
+  if (meetingRunning) {
+    const hint = document.createElement('div');
+    hint.className = 'xover-hint';
+    hint.textContent = t('xover.busyHint');
+    box.appendChild(hint);
+  }
+  for (const ev of pending) {
+    const row = document.createElement('div');
+    row.className = 'xover-row';
+    const txt = document.createElement('span');
+    txt.textContent = `[${t('xover.t.' + ev.type)}] ${ev.text}`;
+    row.appendChild(txt);
+    for (const [label, approve] of [[t('xover.approve'), true], [t('xover.reject'), false]]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.disabled = meetingRunning;
+      b.onclick = async () => {
+        b.disabled = true;
+        b.setAttribute('aria-busy', 'true');
+        let r;
+        try { r = await (await api('crossover-resolve', { id: ev.id, approve })).json(); }
+        catch (e) { r = { error: t('dyn.netErr', { msg: e.message }) }; }
+        b.disabled = false;
+        b.removeAttribute('aria-busy');
+        if (r.error) return setStatebar(r.error, true); // 失败保留行可重试
+        renderXoverQueue(r.crossover);
+      };
+      row.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+}
+
+function renderVerdictStatus(status) {
+  const el = $('#verdictStatus');
+  if (!el) return;
+  el.hidden = status !== 'possibly_stale'; // 过期标记只随真实重审消失，绝不静默复原
+  el.replaceChildren();
+  if (el.hidden) return;
+  const warn = document.createElement('span');
+  warn.textContent = t('xover.stale');
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'accent-outline';
+  go.textContent = t('xover.rejudge');
+  go.onclick = async () => { go.disabled = true; go.setAttribute('aria-busy', 'true'); await api('rejudge'); };
+  const later = document.createElement('button');
+  later.type = 'button';
+  later.className = 'linklike';
+  later.textContent = t('xover.rejudgeLater');
+  later.title = t('xover.rejudgeLaterHint');
+  later.onclick = () => setStatebar(t('xover.rejudgeLaterHint'));
+  el.append(warn, go, later);
+}
+
 // ---- 重置会话相关 UI 状态（新会话 / 重连前调用）----
 function resetSessionUI() {
+  resetArenaSideUI();
   stopBadgeTimer('A'); stopBadgeTimer('B');
   $('#brief').hidden = true; $('#briefTopic').textContent = ''; $('#briefMaterials').textContent = '';
   $('#colA .roundnav').innerHTML = ''; $('#colB .roundnav').innerHTML = '';
   $('#colA .feed').innerHTML = ''; $('#colB .feed').innerHTML = '';
   $('#colA .badge').textContent = ''; $('#colB .badge').textContent = '';
   $('#colA .name').textContent = ''; $('#colB .name').textContent = '';
-  $('#summary').textContent = '';
-  $('#judgecard').hidden = true; $('#judgecard pre').textContent = '';
+  $('#summary').replaceChildren();
+  $('#judgecard').hidden = true; $('#judgeRaw').textContent = ''; $('#judgeStructured').replaceChildren();
+  const xq = $('#xoverQueue'); if (xq) { xq.hidden = true; xq.innerHTML = ''; delete xq.dataset.approveAllBusy; }
+  lastXoverSummary = null; meetingRunning = false;
+  const vs = $('#verdictStatus'); if (vs) { vs.hidden = true; vs.innerHTML = ''; }
   sessionOrigin = '';
   $('#flowbackAnyWrap').hidden = true;
   const statebar = $('#statebar'); statebar.textContent = ''; statebar.hidden = true; statebar.classList.remove('err');
@@ -375,6 +1002,8 @@ async function attach(id) {
   $('#colB .name').textContent = detail.agentNames?.[detail.roles.debaters[1]] ?? detail.roles.debaters[1];
   renderChatRecipients(detail.roles, detail.agentNames ?? {});
   initStaffStatus(detail.roles, detail.agentNames ?? {});
+  renderXoverQueue(detail.crossover ?? null);
+  renderVerdictStatus(detail.crossover?.verdictStatus ?? null);
   showArena();
   connectEvents(); // 回放缓冲事件重建全部内容
   await refreshSessionList();
@@ -416,7 +1045,7 @@ $('#start').onclick = async () => {
   try {
     r = await (await fetch('/api/sessions', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ topic: $('#topic').value, materials: $('#materials').value, template: $('#tpl').value, workspace: $('#workspace').value.trim(), roles, mode: 'manual', origin: draftOrigin ?? '', lang: draftLang ?? LANG }),
+      body: JSON.stringify({ topic: $('#topic').value, materials: $('#materials').value, template: $('#tpl').value, capTemplate: $('#capTpl').value, capGrants: draftCapGrants, workspace: $('#workspace').value.trim(), roles, mode: 'manual', origin: draftOrigin ?? '', lang: draftLang ?? LANG }),
     })).json();
   } catch (e) {
     btn.disabled = false;
@@ -433,6 +1062,7 @@ $('#start').onclick = async () => {
   resetSessionUI();
   sessionOrigin = draftOrigin ?? '';
   draftOrigin = null; // 已随建会提交，防止串到下一场手建会议
+  draftCapGrants = []; // 同上：授权继承只随本次升格生效
   draftLang = null;
   setBrief($('#topic').value, $('#materials').value);
   $('#setup').hidden = true; // setupbar 已在 resetSessionUI 中清空隐藏
@@ -467,13 +1097,20 @@ $('#chatSend').onclick = async () => {
   if (!text) return;
   const to = [...$('#chatRecipients').querySelectorAll('input:checked')].map(cb => cb.value);
   if (!to.length) return setStatebar(t('dyn.needRecipient'), true);
+  arenaLastUserChatQ = text;
   $('#chatInput').value = '';
   await api('chat', { text, to });
 };
 $('#chatInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $('#chatSend').onclick(); }
 });
-$('#copycard').onclick = () => navigator.clipboard.writeText($('#judgecard pre').textContent);
+$('#arenaSideToggle').onclick = () => toggleArenaSide(arenaSideMode === 'closed');
+$('#arenaSideClose').onclick = () => { toggleArenaSide(false); $('#arenaSideToggle').focus(); };
+$('#arenaSideWiden').onclick = () => setArenaSideMode(arenaSideMode === 'wide' ? 'open' : 'wide');
+$('#arenaScrim').onclick = () => { toggleArenaSide(false); $('#arenaSideToggle').focus(); };
+window.addEventListener('resize', () => setArenaSideMode(arenaSideMode));
+setArenaSideMode(arenaSideMode);
+$('#copycard').onclick = () => navigator.clipboard.writeText($('#judgeRaw').textContent);
 async function doFlowback(target) {
   setStatebar(t('dyn.flowbackBusy')); // 归档目标要先从磁盘恢复，可能有一两秒——给进行中反馈
   let r;

@@ -10,7 +10,7 @@ import { startServer } from '../src/server.js';
 const dir = mkdtempSync(path.join(tmpdir(), 'rt-avail-'));
 const agentsFile = path.join(dir, 'agents.json');
 writeFileSync(agentsFile, JSON.stringify({
-  ok: { name: 'OK', command: ['node', 'test/mock-cli.cjs'], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT'], cwd: '.', roles: ['debater'] },
+  ok: { name: 'OK', command: ['node', path.resolve('test/mock-cli.cjs')], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT'], cwd: '.', roles: ['debater'] },
   bad: { name: 'Bad', command: ['nonexistent-cli-xyz'], input: 'stdin', output: 'text', timeoutMs: 5000, envWhitelist: ['PATH', 'SYSTEMROOT'], cwd: '.', roles: ['debater'] },
 }));
 

@@ -10,7 +10,7 @@
 
 > Rides your own CLI subscriptions (Claude Code / Codex / …) — zero marginal API cost, zero dependencies, all local. The UI ships in **English and 中文** (toggle in the top-left).
 >
-> And because each participant is your **full CLI agent — not a bare model over an API** — they bring everything you've taught them: your installed skills auto-trigger when relevant, your memory files and global instructions apply, and (with a mounted project) they read real files instead of debating from imagination. An API-based council gets stock models; Roundtable convenes the agents you've already customized.
+> Each participant is your **full CLI agent — not a bare model over an API** — riding the subscription and login you already have. **Roundtable is the context and capability assembler for strategy work**: you pick a meeting template, and capabilities inside that session's authorized profile load and auto-trigger; capabilities outside it are never auto-discovered or auto-loaded just because they exist on your machine (personal global skills, other projects' hooks, plugins, MCP servers, memories). Strong frameworks, persona lenses, web research, paid actions, private data and write access each require explicit confirmation. Every call writes a machine-readable `context_manifest.json` recording what was assembled and under which permissions — honestly, including the parts (like Codex's residual global config) that are only best-effort isolated today.
 
 *[中文说明见下方](#roundtable-多引擎圆桌) · Chinese version below.*
 
@@ -90,6 +90,7 @@ npm start
 - **Relay** — "Let them talk × N": models take turns, each sees the full labeled thread, pushes back and questions by name; stop anytime, auto-ends when talked out.
 - **Build (write mode)**: mount a git repo, pick one model, hit Build — it creates/edits files in an isolated **git worktree**, posts a per-file diff card; you **Apply / Discard** each. Your working tree is untouched until you apply; applies land in the tree and are **never auto-committed** (commit stays in your own git flow). Write access is narrowed: Claude runs file-tools-only (no Bash), Codex uses native `--sandbox workspace-write`.
 - **Run check** on a temp copy before applying; **session resume** so a model remembers files it already touched across builds.
+- **Execution handoff** compiles a deterministic, versioned task text with visible start/end markers. After reviewing the complete text, you explicitly confirm and copy it; the browser immediately reads it back and compares exact text, UTF-8 bytes, and SHA-256. The saved Claude/Codex target is only your own label — Roundtable does not connect to that desktop thread, paste, send, execute, or verify the eventual desktop input/result.
 - **Promote to meeting** packages the chat into a committee draft (and the verdict can flow back).
 
 **Committee (structured debate)**
@@ -130,6 +131,7 @@ Engines are declared in `adapters/agents.json` — no vendor is hard-coded:
 - Credential redaction on everything persisted.
 - Participants run read-only / tool-disabled where supported (Codex `--sandbox read-only --ephemeral`, Claude `--disallowedTools`).
 - Model output is displayed as text and **never executed**; prompts always go via argv array / stdin / temp file, never a concatenated shell string.
+- Execution handoff is clipboard-only and only starts from the visible confirm-and-copy button. Copy-time readback does not prove which desktop thread received the text, what was in its input box, what the user sent, or what a desktop agent did.
 - Write mode edits an isolated worktree; the diff lands in your working tree only after you approve, and `git apply` rejects path-traversal patches.
 
 Every meeting is fully replayable on disk under `sessions/`: problem statement, per-round prompts and raw outputs, rolling summaries with the disagreement table, the verdict card, and a full `session.md` transcript.
@@ -164,7 +166,7 @@ Claude Code 说 A，Codex 说 B——听谁的？会议模式不让它们各说�
 
 零依赖：Node 原生模块 + 原生前端，连 `npm install` 都不用跑。
 
-**参会的不是裸模型，是你调教过的完整 agent。** Roundtable 骑的是 CLI 而非 API——每位参会者自带你装好的技能（相关时自动触发）、你的记忆文件与全局指令，挂上项目目录还能翻真实代码而不是凭想象辩论。API 型「模型委员会」请到的是出厂模型，Roundtable 请到的是你已经养成的那几位。
+**参会的不是裸模型，是你的完整 CLI agent**——骑你已有的订阅和登录态。**Roundtable 是策略任务的上下文与能力装配者**：你选定会议模板，本场授权 profile 内的能力照常装配并自动触发；profile 外的能力不会因为存在于你机器上就自动进入会议（个人全局技能、其他项目的 hooks、插件、MCP、记忆一概如此）。强框架、人物视角、联网、付费、私有数据与写入权限，各自需要显式确认。每次调用都落一份机器可读的 `context_manifest.json`，如实记录装配了什么、在什么权限下——包括今天只能 best-effort 隔离的部分（如 Codex 的全局配置残余）。
 
 ## 5 分钟上手
 
@@ -255,6 +257,7 @@ npm start
 - **互聊**：「让他们讨论 × N 轮」——模型按顺序接力发言，每位都看到完整讨论（含其他模型的标注发言），被鼓励点名反驳与追问；随时可停，模型回复【无新增】自动收敛终止
 - 长历史自动裁剪（整条消息取舍，绝不切半），裁剪时界面明示"该模型仅看到最近 N 条"——禁止静默截断
 - **动手（写模式）**：工作台挂载 git 项目目录后，勾选一位模型点「动手」——它在 **git worktree 隔离副本**里真实创建/修改文件，产出 diff 卡片贴回聊天；你逐个审批「应用到主工作区 / 丢弃」。主工作区在你点应用之前零接触；应用只落到工作树，commit 权始终在你自己的 git 流程里。写权限收窄：Claude 只开文件工具（禁 Bash），Codex 走原生 `--sandbox workspace-write`
+- **执行交接**：把任务编译为带版本和可见首尾标记的确定性全文。你看完全文后显式点「确认并复制」，浏览器立即回读，并逐字比较文本、UTF-8 字节数与 SHA-256。保存的 Claude/Codex 目标只是你手填的识别标签；Roundtable 不连接桌面线程、不自动粘贴或发送、不执行，也无法验证桌面输入框或最终结果。
 - **升格为会议**：一键把讨论打包成会议草稿，转入正式委员会流程（裁决可回流）
 - 全程落盘（每条消息、每次调用的完整 prompt 与原始输出），跨重启恢复
 
@@ -275,6 +278,7 @@ npm start
 - 所有落盘内容过凭据擦除（redaction）
 - 参会 CLI 尽量以只读/禁工具模式运行（Codex `--sandbox read-only --ephemeral`、Claude `--disallowedTools`）
 - 模型输出只作为文本展示，永不执行；prompt 永远走 argv 数组 / stdin / 临时文件，不拼 shell 字符串
+- 执行交接只写剪贴板，且只能由可见的「确认并复制」按钮触发；复制时回读不能证明桌面线程身份、桌面输入框内容、用户实际发送内容或桌面 Agent 的执行结果
 - 写模式改的是隔离副本，diff 经你审批才落到工作树；`git apply` 拒绝路径穿越 patch
 
 ## 会话产物（可复盘）

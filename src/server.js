@@ -14,6 +14,18 @@ import { resolveCliPath } from './resolve.js';
 import { redact } from './redactor.js';
 import { runAgent } from './runner.js';
 
+// 上传文件名清洗（跨平台）：path.basename 依赖运行平台——在 Linux(posix) 上 `\` 不是分隔符，
+// 会放过 Windows 风格穿越名（..\..\x 整段留下）。这里平台无关地同时按 / 和 \ 切分取最后一段，
+// 去危险字符、把连续点收敛为一个、剥掉前导点，确保结果永远是纯基名、绝不残留 `..`。
+export function safeUploadBasename(rawName) {
+  return String(rawName ?? '')
+    .split(/[\\/]/).pop()               // 同时认 / 和 \，取最后一段（= 平台无关的 basename）
+    .replace(/[<>:"/\\|?* -]/g, '_')    // 文件系统不安全字符 → _
+    .replace(/\.{2,}/g, '.')            // 连续点收敛为单个点，消灭 .. 残留
+    .replace(/^\.+/, '')                // 去前导点，杜绝 . / .. / 隐藏文件名
+    .slice(-120);
+}
+
 // 静态文件白名单（无通用静态服务，杜绝路径穿越）
 const STATIC = {
   '/': ['public/index.html', 'text/html'],
@@ -1046,7 +1058,7 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
         // 只取基名并过扩展名白名单；落到会话目录 uploads/ 下，返回描述符供 message 引用。
         if (action === 'upload') {
           const rawName = (() => { try { return decodeURIComponent(String(req.headers['x-rt-filename'] ?? '')); } catch { return ''; } })();
-          const base = path.basename(rawName).replace(/[<>:"/\\|?* -]/g, '_').slice(-120);
+          const base = safeUploadBasename(rawName);
           const ext = path.extname(base).toLowerCase().slice(1);
           const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
           const TEXT_EXT = new Set(['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'log', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs', 'rb', 'sh', 'ps1', 'bat', 'yaml', 'yml', 'toml', 'xml', 'html', 'css', 'sql', 'diff', 'patch', 'ini', 'cfg', 'conf', 'env', 'tex']);
@@ -1080,8 +1092,13 @@ export async function startServer({ port = 7777, agentsFile = 'adapters/agents.j
           const atts = [];
           for (const a of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8)) {
             const stored = String(a?.file ?? '');
-            if (!stored || stored !== path.basename(stored)) continue;
-            const abs = path.join(b.dir, 'uploads', stored);
+            // 平台无关地拒绝任何带路径分隔符（/ 或 \）或 `..` 的存储名——path.basename 在
+            // Linux 不认 `\`，单靠它挡不住 Windows 风格穿越名。再加一道解析后的目录归属校验。
+            if (!stored || /[\\/]/.test(stored) || stored.includes('..')) continue;
+            const uploadsRoot = path.resolve(b.dir, 'uploads');
+            const abs = path.resolve(uploadsRoot, stored);
+            const rel = path.relative(uploadsRoot, abs);
+            if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue; // 解析后必须仍在 uploads/ 内
             if (!existsSync(abs)) continue;
             const ext = path.extname(stored).toLowerCase().slice(1);
             atts.push({ name: String(a.name ?? stored), kind: ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext) ? 'image' : 'text', size: Number(a.size ?? 0), file: abs });

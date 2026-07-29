@@ -27,7 +27,7 @@ function loadClipboard(adapter) {
   const source = readFileSync('public/handoff-clipboard.js', 'utf8');
   const sandbox = {
     window: { __rtClipboard: adapter, navigator: {}, crypto: webcrypto },
-    TextEncoder, Uint8Array, Error, String, Object, Math, JSON,
+    TextEncoder, Uint8Array, Error, String, Object, Math, JSON, Number,
   };
   vm.runInNewContext(source, sandbox, { filename: 'handoff-clipboard.js' });
   return sandbox.window.RTHandoffClipboard;
@@ -309,6 +309,66 @@ test('CRLF 容忍不掩盖真实篡改：行尾之外的改动仍判为不一致
     assert.doesNotMatch(error.diff, /line-endings-only/);
     return true;
   });
+});
+
+test('元数据完整性：正文正确但 fullTextBytes 伪造 → 写入前拒绝，剪贴板零接触', async () => {
+  const adapter = fakeClipboard();
+  const clipboard = loadClipboard(adapter);
+  const pkg = await confirmedText(clipboard, 'trusted text');
+  pkg.fullTextBytes = 999; // 与正文不符的伪造字节数
+  await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
+    assert.equal(error.code, 'CONFIRMED_PACKAGE_INTEGRITY');
+    assert.equal(error.writeOk, false);
+    return true;
+  });
+  assert.equal(adapter.writes, 0); // 校验失败绝不写剪贴板
+  assert.equal(adapter.reads, 0);
+});
+
+test('元数据完整性：正文正确但 fullTextSha256 伪造 → 写入前拒绝，剪贴板零接触', async () => {
+  const adapter = fakeClipboard();
+  const clipboard = loadClipboard(adapter);
+  const pkg = await confirmedText(clipboard, 'trusted text');
+  pkg.fullTextSha256 = '0'.repeat(64); // 与正文不符的伪造哈希
+  await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
+    assert.equal(error.code, 'CONFIRMED_PACKAGE_INTEGRITY');
+    assert.equal(error.writeOk, false);
+    return true;
+  });
+  assert.equal(adapter.writes, 0);
+  assert.equal(adapter.reads, 0);
+});
+
+test('元数据完整性：fullTextBytes 缺失或非法 → 拒绝，剪贴板零接触', async () => {
+  const adapter = fakeClipboard();
+  const clipboard = loadClipboard(adapter);
+  for (const bad of [undefined, -1, 1.5, NaN, '12', null, Number.MAX_SAFE_INTEGER + 1]) {
+    const pkg = await confirmedText(clipboard, 'trusted text');
+    pkg.fullTextBytes = bad;
+    await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
+      assert.equal(error.code, 'CONFIRMED_PACKAGE_INTEGRITY');
+      return true;
+    });
+  }
+  assert.equal(adapter.writes, 0);
+});
+
+test('元数据完整性错误不回显正文或伪造的敏感值', async () => {
+  const adapter = fakeClipboard();
+  const clipboard = loadClipboard(adapter);
+  const secret = 'trusted text CONTAINS_SECRET_sk-live-DEADBEEF-私有代码';
+  const fakeSha = 'f'.repeat(64);
+  const pkg = await confirmedText(clipboard, secret);
+  pkg.fullTextBytes = 424242;   // 伪造字节数
+  pkg.fullTextSha256 = fakeSha; // 伪造哈希
+  await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
+    const blob = JSON.stringify({ message: error.message, code: error.code, stage: error.stage, diff: error.diff ?? '' });
+    assert.doesNotMatch(blob, /CONTAINS_SECRET|sk-live|DEADBEEF|私有代码/); // 无正文
+    assert.doesNotMatch(blob, /424242/);                                   // 无伪造字节数
+    assert.doesNotMatch(blob, new RegExp(fakeSha));                        // 无哈希原值
+    return true;
+  });
+  assert.equal(adapter.writes, 0);
 });
 
 test('反复生成并连续复制不会串版，审计分别对应当前预览', async () => {

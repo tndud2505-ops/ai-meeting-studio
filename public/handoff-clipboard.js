@@ -43,6 +43,19 @@
       || typeof pkg.fullText !== 'string' || typeof pkg.fullTextSha256 !== 'string') {
       throw clipboardError('CONFIRMED_PACKAGE_REQUIRED', 'unavailable', false);
     }
+    // 写入剪贴板之前先验确认包自洽：声明的 fullTextBytes/fullTextSha256 必须由 pkg.fullText 现算重现。
+    // 否则审计会记录与正文不符的 taskId/字节数/哈希。任一不符立即拒绝，绝不写入剪贴板。
+    // 错误只带 code，不含正文、哈希原值或凭据。
+    if (!Number.isSafeInteger(pkg.fullTextBytes) || pkg.fullTextBytes < 0) {
+      throw clipboardError('CONFIRMED_PACKAGE_INTEGRITY', 'unavailable', false);
+    }
+    const expectedBytes = utf8Bytes(pkg.fullText);
+    let expectedSha256;
+    try { expectedSha256 = await sha256Hex(pkg.fullText); }
+    catch (cause) { throw clipboardError('CLIPBOARD_UNAVAILABLE', 'unavailable', false, cause); }
+    if (pkg.fullTextBytes !== expectedBytes || pkg.fullTextSha256 !== expectedSha256) {
+      throw clipboardError('CONFIRMED_PACKAGE_INTEGRITY', 'unavailable', false);
+    }
     try {
       await clipboard.writeText(pkg.fullText);
     } catch (cause) {

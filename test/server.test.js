@@ -451,12 +451,17 @@ test('POST /api/archive/:dirname/resume 跨实例恢复：装配 Committee、SSE
 
     // 继续跑第 2 轮：round 应推进，且第 2 轮简报应真实接上第 1 轮对方（mockA）发言
     await fetch(`${base2}/api/sessions/${resumed.id}/round`, { method: 'POST' });
+    // 等到第 2 轮真正「跑完」——round===2 且 state 回到 paused。runNextRound 里 round+=1 与
+    // setState('running') 之间无 await（瞬态不可被 HTTP 观测），而 r2 各方简报由第 260 行的
+    // this.call→savePrompt 写盘、随后第 265 行才 setState('paused')；故此条件成立即保证
+    // prompts/r2-mockB.md 已落盘。只等 round===2 会在轮首就命中，导致偶发 ENOENT。
     let s = {};
-    for (let i = 0; i < 50 && s.round !== 2; i++) {
+    for (let i = 0; i < 50 && !(s.round === 2 && s.state === 'paused'); i++) {
       await new Promise(r => setTimeout(r, 100));
       s = await (await fetch(`${base2}/api/sessions/${resumed.id}`)).json();
     }
     assert.equal(s.round, 2);
+    assert.equal(s.state, 'paused');
     const r1OutputA = readFileSync(path.join(resumeSessionsDir, dirname, 'raw', 'r1-mockA.md'), 'utf8');
     const briefB = readFileSync(path.join(resumeSessionsDir, dirname, 'prompts', 'r2-mockB.md'), 'utf8');
     assert.ok(briefB.includes(r1OutputA.trim()), '第 2 轮 mockB 的简报应包含第 1 轮对手（mockA）发言原文——证明 history 真实接上了');

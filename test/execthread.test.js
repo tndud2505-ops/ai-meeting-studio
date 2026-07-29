@@ -27,7 +27,7 @@ function loadClipboard(adapter) {
   const source = readFileSync('public/handoff-clipboard.js', 'utf8');
   const sandbox = {
     window: { __rtClipboard: adapter, navigator: {}, crypto: webcrypto },
-    TextEncoder, Uint8Array, Error, String, Object,
+    TextEncoder, Uint8Array, Error, String, Object, Math, JSON,
   };
   vm.runInNewContext(source, sandbox, { filename: 'handoff-clipboard.js' });
   return sandbox.window.RTHandoffClipboard;
@@ -256,17 +256,59 @@ test('fake clipboard 写入后立即回读，逐字、UTF-8 字节和 SHA-256 �
   assert.equal(proof.readbackSha256, pkg.fullTextSha256);
 });
 
-test('fake clipboard 回读不一致明确失败，不返回 readbackOk', async () => {
+test('fake clipboard 回读不一致明确失败，不返回 readbackOk（并带自诊断 diff）', async () => {
   const adapter = fakeClipboard(value => value.slice(0, -1));
   const clipboard = loadClipboard(adapter);
   const pkg = await confirmedText(clipboard, 'must remain exact');
   await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
     assert.equal(error.code, 'CLIPBOARD_MISMATCH');
     assert.equal(error.stage, 'mismatch');
+    // 真实截断仍被抓到；诊断只给结构信息（位置+长度），不回显任何正文
+    assert.match(error.diff, /content mismatch at char index \d+; expected length \d+, readback length \d+/);
+    assert.doesNotMatch(error.diff, /must|remain|exact/);
     return true;
   });
   assert.equal(adapter.writes, 1);
   assert.equal(adapter.reads, 1);
+});
+
+test('剪贴板不一致诊断绝不回显正文（防泄露私有代码/prompt/凭据）', async () => {
+  const secret = 'API_KEY_sk-live-DEADBEEF-私有代码-请勿外泄';
+  // 回读把 secret 中间一段替换掉（模拟被剪贴板管理器/同步工具改写），触发真实内容不一致
+  const adapter = fakeClipboard(value => value.replace('DEADBEEF', 'XXXXXXXX'));
+  const clipboard = loadClipboard(adapter);
+  const pkg = await confirmedText(clipboard, `第一行\n${secret}\n尾行`);
+  await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
+    assert.equal(error.code, 'CLIPBOARD_MISMATCH');
+    // 结构信息在，但绝不含任何原始敏感文本片段
+    assert.match(error.diff, /content mismatch at char index \d+; expected length \d+, readback length \d+/);
+    assert.doesNotMatch(error.diff, /API_KEY|sk-live|DEADBEEF|XXXXXXXX|私有代码|请勿外泄|第一行|尾行/);
+    return true;
+  });
+});
+
+test('CRLF 归一化：模拟 Windows 剪贴板把 LF 往返成 CRLF，不再误判为不一致', async () => {
+  // 模型结论是纯 LF；Windows 剪贴板回读时每个 \n 变成 \r\n——旧的逐字比对因此每次都失败。
+  const adapter = fakeClipboard(value => value.replace(/\n/g, '\r\n'));
+  const clipboard = loadClipboard(adapter);
+  const pkg = await confirmedText(clipboard, '第一行\n第二行\n尾行 🧪');
+  const proof = await clipboard.copyConfirmedText(pkg);
+  assert.equal(proof.readbackOk, true);          // 内容保真（仅行尾约定不同）→ 判为成功
+  assert.equal(proof.readback, '第一行\r\n第二行\r\n尾行 🧪'); // 回读原样回传（含 CRLF）供审计
+  assert.equal(adapter.writes, 1);
+  assert.equal(adapter.reads, 1);
+});
+
+test('CRLF 容忍不掩盖真实篡改：行尾之外的改动仍判为不一致', async () => {
+  // 既转 CRLF 又偷改一个字——归一化只吃行尾，真实内容变更照样抓出来。
+  const adapter = fakeClipboard(value => value.replace(/\n/g, '\r\n').replace('第二行', '第X行'));
+  const clipboard = loadClipboard(adapter);
+  const pkg = await confirmedText(clipboard, '第一行\n第二行\n尾行');
+  await assert.rejects(clipboard.copyConfirmedText(pkg), error => {
+    assert.equal(error.code, 'CLIPBOARD_MISMATCH');
+    assert.doesNotMatch(error.diff, /line-endings-only/);
+    return true;
+  });
 });
 
 test('反复生成并连续复制不会串版，审计分别对应当前预览', async () => {

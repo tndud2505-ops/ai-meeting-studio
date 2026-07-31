@@ -161,7 +161,7 @@ const wbHandoffUi = (() => {
   function clipboardErrorText(error) {
     if (error.stage === 'write') return t('handoff.writeFailed');
     if (error.stage === 'read') return t('handoff.readFailed');
-    if (error.stage === 'mismatch') return t('handoff.mismatch');
+    if (error.stage === 'mismatch') return t('handoff.mismatch') + (error.diff ? ` [${error.diff}]` : '');
     return t('handoff.clipboardUnavailable');
   }
 

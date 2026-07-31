@@ -4,6 +4,17 @@ This file is for Roundtable users. For the detailed internal development stream,
 
 Before 1.0, `0.x.y` uses `y` for bug-fix-only releases, while `x` releases may include breaking changes. / 1.0 之前，`0.x.y` 中的 `y` 只修 bug，`x` 版本可能包含破坏性变更。
 
+## v0.4.2 - 2026-07-31
+
+### Fixed / 修复
+
+- Windows clipboard verification now treats `CRLF`/`LF` line-ending conversion as content-preserving while still rejecting truncation, insertion, replacement, and encoding damage. The confirmed package's UTF-8 byte count and SHA-256 are recomputed before any write, and mismatch diagnostics expose structure only—never clipboard text, credentials, or private code. / Windows 剪贴板验证现在将 `CRLF`/`LF` 换行转换视为内容保真，同时仍会拒绝截断、插入、替换和编码损坏。写入前会重新计算已确认执行包的 UTF-8 字节数与 SHA-256；不匹配诊断只报结构信息，绝不回显剪贴板正文、凭据或私有代码。
+- The cross-instance resume test now waits for round 2 to reach its completed paused state before reading round-2 prompts, eliminating the Windows/Node 20 timing flake without changing production orchestration. / 跨实例恢复测试现在会等第 2 轮真正完成并进入暂停状态后再读取第 2 轮提示词，消除 Windows/Node 20 的时序抖动，不改动生产编排逻辑。
+
+### Upgrade note / 升级提示
+
+- Restart Roundtable after updating. No configuration changes are required. / 更新后请重启 Roundtable；无需修改配置。
+
 ## v0.4.1 - 2026-07-26
 
 ### Fixed / 修复

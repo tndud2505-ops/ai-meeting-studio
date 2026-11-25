@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID, randomInt } from 'node:crypto';
 import { redact } from '../src/redactor.js';
 import { normalizeWorkflow, resolveWorkspace, chooseFlow, chooseCycleOrder, cycleMembers, phaseInstruction, newParallelPlan, runParallelCycle } from './workflow.mjs';
-import { currentSettings, answerStyleRule } from './settings.mjs';
+import { currentSettings, answerStyleRule, toneRule } from './settings.mjs';
 
 export const MODES = ['meeting', 'debate', 'story', 'mystery'];
 const PROVIDERS = ['codex', 'claude', 'gemini'];
@@ -107,6 +107,7 @@ export function buildPrompt(room, participant, phase = '') {
   if(phase==='research')output=output.replace('발언은 한국어 약 '+room.config.wordLimit+'어절 이내','발언은 필요한 조사 근거와 출처를 포함해 한국어 약 300어절 이내');
   if(phase==='review')output=output.replace('발언은 한국어 약 '+room.config.wordLimit+'어절 이내','발언은 핵심 비교와 우선순위를 포함해 한국어 약 180어절 이내');
   if(phase!=='debate-final')output+=answerStyleRule(currentSettings().answerStyle,access);
+  output+=toneRule(currentSettings().tone,participant.provider);
   if(phase==='debate')output+='\n마지막 줄에 [입장: 합의] 또는 [입장: 계속] 중 하나를 반드시 적으세요.';
   return { prompt:output, contextInfo:{ included:selected.length, total:completed.length, truncated:selected.length < completed.length } };
 }

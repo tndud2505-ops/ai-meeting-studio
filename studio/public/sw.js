@@ -3,7 +3,7 @@
 // Cache the application shell only. Conversations, roles, API responses, and
 // event streams always go directly to the local server and are never cached.
 const CACHE_PREFIX = 'meeting-notes-static-';
-const CACHE_NAME = `${CACHE_PREFIX}v4`;
+const CACHE_NAME = `${CACHE_PREFIX}v5`;
 const PRECACHE_URLS = [
   '/',
   '/app.js',

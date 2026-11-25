@@ -17,7 +17,7 @@
   const DRAFT_KEY = 'meeting-notes-composer-v2';
   const WORKFLOW_KEY = 'meeting-workflow-v1';
   const APP_SETTINGS_KEY = 'meeting-app-settings-v1';
-  const DEFAULT_APP_SETTINGS = { fontScale: 100, answerStyle: 'brief', showTime: true, autoScroll: true };
+  const DEFAULT_APP_SETTINGS = { fontScale: 100, answerStyle: 'brief', tone: 'default', showTime: true, autoScroll: true };
   let appSettings = { ...DEFAULT_APP_SETTINGS };
   try { appSettings = { ...appSettings, ...JSON.parse(localStorage.getItem(APP_SETTINGS_KEY) || '{}') }; } catch { /* Defaults. */ }
   let appSettingsTimer = 0;
@@ -31,6 +31,7 @@
     $('fontScaleInput').value = appSettings.fontScale;
     $('fontScaleValue').textContent = appSettings.fontScale + '%';
     $('answerStyleSelect').value = appSettings.answerStyle;
+    $('toneSelect').value = appSettings.tone || 'default';
     $('showTimeInput').checked = appSettings.showTime !== false;
     $('autoScrollInput').checked = appSettings.autoScroll !== false;
   }
@@ -887,6 +888,7 @@
   $('fontScaleInput').addEventListener('input', () => changeAppSetting({ fontScale: Number($('fontScaleInput').value) }));
   $('fontScaleReset').addEventListener('click', () => changeAppSetting({ fontScale: 100 }));
   $('answerStyleSelect').addEventListener('change', () => changeAppSetting({ answerStyle: $('answerStyleSelect').value }));
+  $('toneSelect').addEventListener('change', () => changeAppSetting({ tone: $('toneSelect').value }));
   $('showTimeInput').addEventListener('change', () => changeAppSetting({ showTime: $('showTimeInput').checked }));
   $('autoScrollInput').addEventListener('change', () => changeAppSetting({ autoScroll: $('autoScrollInput').checked }));
   $('workflowButton').addEventListener('click',()=>{

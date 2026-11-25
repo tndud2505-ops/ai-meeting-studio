@@ -91,6 +91,8 @@
     </div>
     <label class="settings-field">답변 길이<select id="answerStyleSelect"><option value="brief">핵심만 (기본)</option><option value="normal">보통</option><option value="detailed">자세히</option></select></label>
     <p class="workflow-note settings-note">AI에게 전달하는 규칙입니다. 다음 답변부터 적용되며 각 AI의 역할 md보다 우선합니다.</p>
+    <label class="settings-field">대화 분위기<select id="toneSelect"><option value="default">기본</option><option value="team">신입 Gemini + 숙련된 Codex·Claude</option><option value="pro">모두 전문가 톤</option></select></label>
+    <p class="workflow-note settings-note">말투만 바뀌고 내용과 결론은 그대로입니다. 다음 답변부터 적용됩니다.</p>
     <label class="enabled-label"><span>메시지 시간 표시</span><input id="showTimeInput" type="checkbox"></label>
     <label class="enabled-label"><span>새 답변이 오면 자동으로 아래로 이동</span><input id="autoScrollInput" type="checkbox"></label>
     <div class="settings-error" id="appSettingsError" role="alert" hidden></div>

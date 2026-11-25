@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "studio": "node studio/server.mjs",
+    "test:studio": "node --test studio/*.test.mjs",
     "test": "node scripts/run-tests.mjs"
   },
   "description": "One table for all your AI CLIs: everyday multi-model group chat (workbench) + structured debate committee with cross-examination and independent judging. Rides your CLI subscriptions, zero dependencies.",

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#faf9f6">
+  <meta name="color-scheme" content="light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="회의">
+  <title>회의</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-identity">
+      <svg class="room-icon" width="29" height="29" viewBox="0 0 28 28" fill="none" aria-hidden="true"><path d="M6.5 4.5h15a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H12l-6 4v-4.1a3 3 0 0 1-2.5-2.9v-10a3 3 0 0 1 3-3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="9" cy="12.5" r="1" fill="currentColor"/><circle cx="14" cy="12.5" r="1" fill="currentColor"/><circle cx="19" cy="12.5" r="1" fill="currentColor"/></svg>
+      <h1>회의</h1>
+    </div>
+    <div class="model-bar" id="modelBar" aria-label="참가 모델"></div>
+    <div class="header-actions">
+      <button id="installButton" class="plain-icon" type="button" title="앱 설치" aria-label="앱 설치" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4M5 15v5h14v-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button id="updateButton" class="plain-icon" type="button" title="앱 업데이트" aria-label="앱 업데이트" hidden>↻</button>
+      <button id="startButton" class="action-button primary" type="button"><span id="startIcon" aria-hidden="true">▶</span><span id="startText">시작</span></button>
+      <button id="resetButton" class="action-button reset-button" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.7 8A8 8 0 1 1 4 13M4.5 3.5V8H9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>초기화</span></button>
+    </div>
+  </header>
+  <main class="meeting">
+    <div class="message-scroll" id="messageScroll" tabindex="0" aria-label="회의 대화">
+      <div class="messages" id="messages" role="log" aria-label="대화" aria-live="off"></div>
+    </div>
+    <div class="composer-area">
+      <div class="error-line" id="errorLine" role="alert" hidden><span id="errorText"></span><button id="dismissErrorButton" type="button" aria-label="오류 메시지 닫기">×</button></div>
+      <form id="composerForm" class="composer">
+        <button id="userProfileButton" class="composer-profile avatar-button" type="button" aria-label="내 프로필 설정" title="내 프로필"></button>
+        <label class="sr-only" for="messageInput">메시지 입력</label>
+        <textarea id="messageInput" rows="1" maxlength="6000" placeholder="메시지 입력" autocomplete="off"></textarea>
+        <button id="sendButton" class="send-button" type="submit" aria-label="메시지 보내기" title="보내기"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </form>
+    </div>
+  </main>
+  <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle">
+    <div class="settings-heading"><div><span id="settingsProviderLabel" class="settings-provider-label"></span><h2 id="settingsTitle">프로필</h2></div><button id="closeSettingsButton" class="plain-icon" type="button" aria-label="설정 닫기">×</button></div>
+    <div class="settings-tabs" role="tablist" aria-label="설정">
+      <button id="profileTab" type="button" role="tab" aria-controls="profilePanel" aria-selected="true" data-tab="profile">프로필</button>
+      <button id="connectionTab" type="button" role="tab" aria-controls="connectionPanel" aria-selected="false" tabindex="-1" data-tab="connection">연결</button>
+      <button id="roleTab" type="button" role="tab" aria-controls="rolePanel" aria-selected="false" tabindex="-1" data-tab="role">역할</button>
+    </div>
+    <section id="profilePanel" class="settings-panel" role="tabpanel" aria-labelledby="profileTab">
+      <div class="profile-editor">
+        <div id="profilePreview" class="profile-preview"></div>
+        <div class="profile-picture-actions">
+          <button id="uploadAvatarButton" class="subtle-button" type="button">사진 선택</button>
+          <button id="resetAvatarButton" class="text-button" type="button">기본 이미지</button>
+          <input id="avatarInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+        </div>
+      </div>
+      <div id="avatarPresets" class="avatar-presets" aria-label="프로필 아이콘"></div>
+      <label class="settings-field">이름<input id="profileName" type="text" maxlength="32" autocomplete="off" placeholder="이름"></label>
+      <div class="color-field"><span>프로필 색</span><div id="profileColors" class="profile-colors" aria-label="프로필 색"></div></div>
+      <div id="modelSettings" class="model-settings">
+        <label class="enabled-label"><span>대화에 참가</span><input id="participantEnabled" type="checkbox"></label>
+        <div class="settings-columns">
+          <label class="settings-field">모델<select id="settingsModel"></select></label>
+          <label class="settings-field">추론 강도<select id="settingsEffort"></select></label>
+        </div>
+      </div>
+    </section>
+    <section id="connectionPanel" class="settings-panel" role="tabpanel" aria-labelledby="connectionTab" hidden>
+      <div class="connection-status-row"><span>로그인</span><span id="connectionState" class="state-badge"></span></div>
+      <div id="connectionCli" class="connection-cli"></div>
+      <div class="connection-actions"><button id="loginButton" class="subtle-button" type="button">로그인</button><button id="refreshAuthButton" class="subtle-button" type="button">로그인 확인</button><button id="checkButton" class="dark-button" type="button">응답 테스트</button></div>
+      <p id="loginHint" class="login-hint" hidden></p>
+      <div id="verificationCard" class="verification-card"></div>
+    </section>
+    <section id="rolePanel" class="settings-panel" role="tabpanel" aria-labelledby="roleTab" hidden>
+      <div class="role-heading"><label for="roleInput">역할</label><span id="roleFilename"></span></div>
+      <textarea id="roleInput" class="role-input" spellcheck="false" maxlength="16000" aria-label="역할 Markdown"></textarea>
+    </section>
+    <div class="settings-error" id="settingsError" role="alert" hidden></div>
+    <div class="settings-footer"><span id="saveState" role="status"></span><button id="saveRoleButton" class="dark-button" type="button">저장</button></div>
+  </dialog>
+</body>
+</html>

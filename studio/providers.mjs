@@ -455,9 +455,9 @@ function buildInvocation(provider, model, effort, prompt, access = 'chat') {
     return { args, input: prompt };
   }
   if (provider === 'claude') {
-    const args = ['--safe-mode', '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', project?'Read,Glob,Grep,Edit,Write,Bash,PowerShell,WebSearch,WebFetch':web?'WebSearch,WebFetch':'',
+    const args = ['--setting-sources', 'local', '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', project?'Read,Glob,Grep,Edit,Write,Bash,PowerShell,WebSearch,WebFetch':web?'WebSearch,WebFetch':'',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands', '--no-session-persistence'];
-    if(web)args.push('--restricted','--permission-mode',project?'acceptEdits':'dontAsk','--permission-prompts','none','--allowedTools','WebSearch,WebFetch');
+    if(web)args.push('--permission-mode',project?'acceptEdits':'dontAsk','--allowedTools','WebSearch,WebFetch');
     if (model) args.push('--model', model);
     if (effort) args.push('--effort', effort);
     return { args, input: prompt };

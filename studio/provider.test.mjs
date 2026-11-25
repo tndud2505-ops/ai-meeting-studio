@@ -19,7 +19,7 @@ test('prompts containing Korean and shell syntax stay exclusively on stdin', () 
 test('Claude disables tools using a real empty argv value and preserves OAuth', () => {
   const { args } = t.buildInvocation('claude', '', 'medium', 'hi');
   assert.equal(args[args.indexOf('--tools') + 1], '');
-  assert.ok(args.includes('--safe-mode'));
+  assert.ok(args.includes('--setting-sources'));
   assert.ok(!args.includes('--bare'));
   assert.deepEqual(JSON.parse(args[args.indexOf('--mcp-config') + 1]), { mcpServers: {} });
 });
@@ -43,7 +43,7 @@ test('research enables only public web tools and project mode enables workspace 
       assert.ok(project.includes('workspace-write'));assert.ok(project.includes('features.shell_tool=true'));
     }else if(provider==='claude'){
       assert.equal(research[research.indexOf('--tools')+1],'WebSearch,WebFetch');
-      assert.ok(project.includes('--restricted'));assert.match(project[project.indexOf('--tools')+1],/Read.*Edit.*Bash/);
+      assert.ok(project.includes('--permission-mode'));assert.match(project[project.indexOf('--tools')+1],/Read.*Edit.*Bash/);
     }else{
       const s=JSON.parse(research[research.indexOf('--settings')+1]);assert.ok(s.permissions.allow.includes('read_url(*)'));assert.ok(s.permissions.deny.includes('command(*)'));
       assert.ok(project.includes('--sandbox'));assert.ok(!JSON.parse(project[project.indexOf('--settings')+1]).permissions.deny.includes('write_file(*)'));

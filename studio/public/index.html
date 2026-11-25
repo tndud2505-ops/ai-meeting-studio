@@ -21,30 +21,67 @@
       <svg class="room-icon" width="29" height="29" viewBox="0 0 28 28" fill="none" aria-hidden="true"><path d="M6.5 4.5h15a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H12l-6 4v-4.1a3 3 0 0 1-2.5-2.9v-10a3 3 0 0 1 3-3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="9" cy="12.5" r="1" fill="currentColor"/><circle cx="14" cy="12.5" r="1" fill="currentColor"/><circle cx="19" cy="12.5" r="1" fill="currentColor"/></svg>
       <h1>회의</h1>
     </div>
-    <div class="model-bar" id="modelBar" aria-label="참가 모델"></div>
     <div class="header-actions">
-      <button id="installButton" class="plain-icon" type="button" title="앱 설치" aria-label="앱 설치" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4M5 15v5h14v-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-      <button id="updateButton" class="plain-icon" type="button" title="앱 업데이트" aria-label="앱 업데이트" hidden>↻</button>
-      <button id="appSettingsButton" class="plain-icon" type="button" title="전체 설정" aria-label="전체 설정"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="15" cy="7" r="2" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="17" r="2" stroke="currentColor" stroke-width="1.6"/></svg></button>
-      <button id="startButton" class="action-button primary" type="button"><span id="startIcon" aria-hidden="true">▶</span><span id="startText">시작</span></button>
+      <details id="optionsMenu" class="options-menu">
+        <summary class="plain-icon" title="옵션" aria-label="옵션">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="15" cy="7" r="2" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="17" r="2" stroke="currentColor" stroke-width="1.6"/></svg>
+        </summary>
+        <div class="options-popover">
+          <button id="workflowButton" type="button"><span>진행 및 도구 설정</span><span id="workflowLabel" class="option-value"></span></button>
+          <button id="appSettingsButton" type="button">전체 설정</button>
+          <button id="installButton" type="button" hidden>앱 설치</button>
+          <button id="updateButton" type="button" hidden>앱 업데이트</button>
+        </div>
+      </details>
+      <button id="participantsToggle" class="plain-icon" type="button" aria-controls="participantsPanel" aria-expanded="false" aria-label="참가자 패널" title="참가자 패널">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M14.5 5v14" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
       <button id="resetButton" class="action-button reset-button" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.7 8A8 8 0 1 1 4 13M4.5 3.5V8H9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>초기화</span></button>
+      <button id="startButton" class="action-button primary" type="button"><span id="startIcon" aria-hidden="true">▶</span><span id="startText">시작</span></button>
     </div>
   </header>
-  <main class="meeting">
+  <div class="room-layout">
+  <main class="meeting" id="meetingPane" aria-labelledby="discussionTitle">
+    <div class="discussion-header">
+      <div class="discussion-title">
+        <h2 id="discussionTitle">회의 토론</h2>
+        <span class="discussion-status" id="discussionStatus" role="status">연결 중</span>
+      </div>
+      <label class="sr-only" for="meetingMode">진행 방식</label>
+      <select class="meeting-mode" id="meetingMode">
+        <option value="chat">회의</option>
+        <option value="debate">토론</option>
+      </select>
+    </div>
     <div class="message-scroll" id="messageScroll" tabindex="0" aria-label="회의 대화">
       <div class="messages" id="messages" role="log" aria-label="대화" aria-live="off"></div>
+      <p class="empty-discussion" id="emptyDiscussion">아직 발언이 없습니다.</p>
     </div>
     <div class="composer-area">
       <div class="error-line" id="errorLine" role="alert" hidden><span id="errorText"></span><button id="dismissErrorButton" type="button" aria-label="오류 메시지 닫기">×</button></div>
       <form id="composerForm" class="composer">
-        <button id="userProfileButton" class="composer-profile avatar-button" type="button" aria-label="내 프로필 설정" title="내 프로필"></button>
-        <button id="workflowButton" class="workflow-button" type="button" aria-label="진행 및 도구 설정" title="진행 및 도구 설정"><span aria-hidden="true">⚙</span><span id="workflowLabel">자동 · 웹</span></button>
         <label class="sr-only" for="messageInput">메시지 입력</label>
         <textarea id="messageInput" rows="1" maxlength="6000" placeholder="메시지 입력" autocomplete="off"></textarea>
         <button id="sendButton" class="send-button" type="submit" aria-label="메시지 보내기" title="보내기"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </form>
     </div>
   </main>
+  <button id="participantsBackdrop" class="participants-backdrop" type="button" tabindex="-1" aria-label="참가자 패널 닫기" hidden></button>
+  <aside class="participants-panel" id="participantsPanel" aria-labelledby="participantsTitle" hidden>
+    <div class="participants-heading">
+      <h2 id="participantsTitle">참가자</h2>
+      <button id="participantsClose" class="plain-icon" type="button" aria-label="참가자 패널 닫기" title="참가자 패널 닫기">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <ul class="participant-list" id="modelBar"></ul>
+    <div class="participant-self">
+      <button id="userProfileButton" class="user-profile-button" type="button" aria-label="내 프로필 설정">
+        <span id="userProfileAvatar" aria-hidden="true"></span><span id="userProfileName">나</span>
+      </button>
+    </div>
+  </aside>
+  </div>
   <dialog id="appSettingsDialog" class="settings-dialog" aria-labelledby="appSettingsTitle">
     <div class="settings-heading"><h2 id="appSettingsTitle">전체 설정</h2><button id="closeAppSettingsButton" class="plain-icon" type="button" aria-label="전체 설정 닫기">×</button></div>
     <div class="settings-field">

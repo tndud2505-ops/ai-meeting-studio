@@ -87,6 +87,7 @@
   };
   const headerControls = new Map();
   const messageNodes = new Map();
+  const compactLayout = window.matchMedia('(max-width: 740px)');
   let messageSignature = '';
   let events;
 
@@ -125,8 +126,7 @@
   function refreshProfileViews() {
     state.profileRevision++;
     renderModelBar();
-    drawAvatar($('userProfileButton'), 'user');
-    $('userProfileButton').title = profile('user').displayName + ' · 내 프로필';
+    renderSelfProfile();
     renderMessages();
   }
   async function loadProfiles() {
@@ -159,6 +159,11 @@
   function renderWorkflow(){
     $('workflowLabel').textContent=({auto:'자동',sequential:'순차',parallel:'동시',debate:'토론'})[workflow.access==='project'?'sequential':workflow.flow]+' · '+({chat:'대화',research:'웹',project:'작업'})[workflow.access];
     $('workflowButton').title=workflow.access==='project'?workflow.workspace:'진행 및 도구 설정';
+    const debateOn=workflow.flow==='debate'&&workflow.access!=='project';
+    const mode = $('meetingMode');
+    mode.value = debateOn ? 'debate' : 'chat';
+    mode.options[1].disabled = workflow.access === 'project';
+    $('messageInput').placeholder = debateOn ? '토론 주제 입력' : '주제나 메시지 입력';
   }
   function syncWorkflowDialog(){
     const project=$('workflowAccess').value==='project';
@@ -274,21 +279,19 @@
   }
 
   function buildModelBar() {
-    for (const id of IDS) {
-      const wrapper = el('div', 'model-control');
-      const avatar = el('button', 'avatar-button header-avatar');
-      avatar.type = 'button';
-      avatar.setAttribute('aria-label', NAMES[id] + ' 프로필 설정');
-      const status = el('span', 'connection-dot');
-      status.setAttribute('aria-hidden', 'true');
-      const avatarWrap = el('div', 'header-avatar-wrap');
-      avatarWrap.append(avatar, status);
-      const details = el('div', 'model-control-details');
-      const name = el('button', 'provider-name', NAMES[id]);
-      name.type = 'button';
-      name.setAttribute('aria-label', NAMES[id] + ' 설정');
+    for (const id of ['claude', 'gemini', 'codex']) {
+      const wrapper = el('li', 'participant-row');
+      const profileButton = el('button', 'participant-profile');
+      profileButton.type = 'button';
+      const avatar = el('span', 'participant-avatar');
+      avatar.setAttribute('aria-hidden', 'true');
+      const details = el('span', 'participant-details');
+      const name = el('span', 'participant-name', NAMES[id]);
+      const status = el('span', 'participant-status');
+      details.append(name, status);
+      profileButton.append(avatar, details);
       const select = document.createElement('select');
-      select.className = 'header-model';
+      select.className = 'participant-model';
       select.setAttribute('aria-label', NAMES[id] + ' 모델');
       select.addEventListener('change', () => {
         participant(id).model = select.value;
@@ -297,32 +300,57 @@
         renderModelBar();
         if (state.settingsProvider === id && $('settingsDialog').open) renderSettingsModel();
       });
-      avatar.addEventListener('click', () => openSettings(id));
-      name.addEventListener('click', () => openSettings(id));
-      details.append(name, select);
-      wrapper.append(avatarWrap, details);
+      profileButton.addEventListener('click', () => openSettings(id));
+      wrapper.append(profileButton, select);
       $('modelBar').append(wrapper);
-      headerControls.set(id, { wrapper, select, avatar, name, status });
+      headerControls.set(id, { wrapper, select, avatar, name, status, profileButton });
     }
     renderModelBar();
-    drawAvatar($('userProfileButton'), 'user');
+    renderSelfProfile();
+  }
+  function renderSelfProfile() {
+    const person = profile('user');
+    drawAvatar($('userProfileAvatar'), person);
+    $('userProfileName').textContent = person.displayName;
+  }
+  function setParticipantsOpen(open, moveFocus = false) {
+    const panel = $('participantsPanel');
+    const toggle = $('participantsToggle');
+    const containedFocus = panel.contains(document.activeElement);
+    panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+    $('participantsBackdrop').hidden = !open || !compactLayout.matches;
+    $('meetingPane').inert = open && compactLayout.matches;
+    if (!open && containedFocus) toggle.focus();
+    else if (open && moveFocus && compactLayout.matches) $('participantsClose').focus();
   }
   function authValue(data) { return data.authStatus || data.auth || 'unknown'; }
   function renderModelBar() {
     for (const id of IDS) {
       const controls = headerControls.get(id);
       if (!controls) continue;
-      const data = provider(id);
       const person = profile(id);
       modelOptions(controls.select, id, true);
       drawAvatar(controls.avatar, person);
       controls.name.textContent = person.displayName;
-      controls.avatar.title = person.displayName + ' · 프로필';
-      controls.wrapper.classList.toggle('is-disabled', participant(id).enabled === false);
-      const auth = authValue(data);
-      const verified = data.verification?.status === 'verified';
-      controls.status.dataset.state = participant(id).enabled === false ? 'off' : ['required', 'login_required', 'missing'].includes(auth) ? 'attention' : verified ? 'verified' : 'unknown';
-      controls.wrapper.title = participant(id).enabled === false ? '참가 안 함' : verified ? '최근 응답 테스트: ' + fullTimeLabel(data.verification.checkedAt) : ['required', 'login_required', 'missing'].includes(auth) ? '로그인 또는 설치 필요' : '응답 테스트 전';
+      controls.profileButton.setAttribute('aria-label', person.displayName + ' 설정');
+      controls.profileButton.title = person.displayName + ' 설정';
+      controls.select.title = person.displayName + ' 모델';
+    }
+    renderParticipantStatuses();
+  }
+  function renderParticipantStatuses() {
+    const speaking = new Set((state.room?.messages || [])
+      .filter(message => message.status === 'streaming')
+      .map(message => message.provider));
+    for (const [id, controls] of headerControls) {
+      const auth = authValue(provider(id));
+      const off = participant(id).enabled === false;
+      const attention = ['required', 'login_required', 'missing'].includes(auth);
+      const responding = state.connected && speaking.has(id);
+      controls.wrapper.classList.toggle('is-disabled', off);
+      controls.status.dataset.state = off ? 'off' : responding ? 'active' : attention ? 'attention' : 'idle';
+      controls.status.textContent = off ? '참가 안 함' : responding ? '응답 중' : attention ? '연결 확인' : '대기 중';
     }
   }
   function renderSettingsModel() {
@@ -666,7 +694,7 @@
       const person = DEFAULT_PROFILES[id] ? profile(id) : { displayName: message.name || '회의' };
       const wrapper = el('article', 'message' + (isUser ? ' user' : isSystem ? ' system' : ' assistant') + (streaming ? ' streaming' : '') + (waiting ? ' waiting' : ''));
       wrapper.dataset.messageId = message.id;
-      if (!isUser && !isSystem && DEFAULT_PROFILES[id]) {
+      if (!isSystem && DEFAULT_PROFILES[id]) {
         const avatar = el('button', 'avatar-button message-avatar');
         avatar.type = 'button';
         drawAvatar(avatar, person);
@@ -675,11 +703,10 @@
         wrapper.append(avatar);
       }
       const content = el('div', 'message-content');
-      const nameNode = el('span', 'message-name' + (isUser ? ' sr-only' : ''), message.name || person.displayName);
+      const nameNode = el('span', 'message-name', message.name || person.displayName);
       if (message.model) nameNode.title = NAMES[message.provider] + ' · ' + message.model + (message.effort ? ' · ' + effortLabel(message.effort) : '');
       if(message.phase&&!isUser&&!isSystem)nameNode.append(el('span','phase-label',({research:'조사',debate:'토론 '+(message.round||''),'debate-final':'최종 결론'})[message.phase]||'검토'));
       if(message.tools?.length&&!isUser&&!isSystem){const labels={web:'웹',terminal:'터미널',files:'파일'};nameNode.title+=(nameNode.title?' · ':'')+'CLI 도구 이벤트: '+message.tools.map(t=>labels[t]).filter(Boolean).join(', ');}
-      const bubbleRow = el('div', 'bubble-row');
       const bubble = el('div', 'message-bubble');
       const text = el('div', 'message-text', message.text || '');
       if(message.status==='complete'&&!isUser&&!isSystem){
@@ -704,8 +731,9 @@
       }
       const time = el('time', 'message-time', timeLabel(message.startedAt));
       if (message.startedAt) time.dateTime = message.startedAt;
-      bubbleRow.append(bubble, time);
-      content.append(nameNode, bubbleRow);
+      const meta = el('div', 'message-meta');
+      meta.append(nameNode, time);
+      content.append(meta, bubble);
       wrapper.append(content);
       $('messages').append(wrapper);
       messageNodes.set(message.id, { wrapper, text, message });
@@ -726,6 +754,13 @@
     $('updateButton').hidden = !state.waitingWorker || running;
     $('updateButton').disabled = state.applyingUpdate || state.busy || state.sending;
     $('workflowButton').disabled=running||state.busy||state.sending;
+    $('meetingMode').disabled = running || state.busy || state.sending;
+    $('emptyDiscussion').hidden = Boolean(state.room?.messages?.length);
+    const status = !state.connected ? '연결 확인 중' :
+      state.room?.pausePending ? '일시정지 요청됨' : running ? '진행 중' :
+        ({ paused: '일시정지', completed: '완료', stopped: '중지', error: '오류' })[state.room?.status] || '대기 중';
+    if ($('discussionStatus').textContent !== status) $('discussionStatus').textContent = status;
+    renderParticipantStatuses();
     if ($('settingsDialog').open) renderConnection();
   }
   function resizeComposer() {
@@ -829,7 +864,24 @@
   buildModelBar();
   renderWorkflow();
   applyAppSettings();
-  $('appSettingsButton').addEventListener('click', () => { syncAppSettingsDialog(); $('appSettingsState').textContent = ''; $('appSettingsError').hidden = true; $('appSettingsDialog').showModal(); });
+  const optionsMenu = $('optionsMenu');
+  setParticipantsOpen(!compactLayout.matches);
+  compactLayout.addEventListener('change', () => setParticipantsOpen(!compactLayout.matches));
+  $('participantsToggle').addEventListener('click', () => setParticipantsOpen($('participantsPanel').hidden, true));
+  $('participantsClose').addEventListener('click', () => setParticipantsOpen(false));
+  $('participantsBackdrop').addEventListener('click', () => setParticipantsOpen(false));
+  document.addEventListener('click', event => {
+    if (!optionsMenu.contains(event.target)) optionsMenu.open = false;
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+    if (optionsMenu.open) { optionsMenu.open = false; optionsMenu.querySelector('summary').focus(); }
+    else if (compactLayout.matches && !$('participantsPanel').hidden) setParticipantsOpen(false);
+  });
+  for (const id of ['appSettingsDialog', 'workflowDialog']) {
+    $(id).addEventListener('close', () => optionsMenu.querySelector('summary').focus());
+  }
+  $('appSettingsButton').addEventListener('click', () => { optionsMenu.open = false; syncAppSettingsDialog(); $('appSettingsState').textContent = ''; $('appSettingsError').hidden = true; $('appSettingsDialog').showModal(); });
   $('closeAppSettingsButton').addEventListener('click', () => $('appSettingsDialog').close());
   $('doneAppSettingsButton').addEventListener('click', () => $('appSettingsDialog').close());
   $('fontScaleInput').addEventListener('input', () => changeAppSetting({ fontScale: Number($('fontScaleInput').value) }));
@@ -838,10 +890,18 @@
   $('showTimeInput').addEventListener('change', () => changeAppSetting({ showTime: $('showTimeInput').checked }));
   $('autoScrollInput').addEventListener('change', () => changeAppSetting({ autoScroll: $('autoScrollInput').checked }));
   $('workflowButton').addEventListener('click',()=>{
+    optionsMenu.open = false;
     $('workflowFlow').value=workflow.flow;$('workflowAccess').value=workflow.access;$('workspaceInput').value=workflow.workspace;$('workflowMaxRounds').value=workflow.maxRounds;
     syncWorkflowDialog();$('workflowDialog').showModal();
   });
   $('workflowAccess').addEventListener('change',syncWorkflowDialog);
+  function setMode(debate){
+    if(debate&&workflow.access==='project'){renderWorkflow();return;}
+    workflow={...workflow,flow:debate?'debate':'auto'};
+    try{localStorage.setItem(WORKFLOW_KEY,JSON.stringify(workflow));}catch{}
+    renderWorkflow();
+  }
+  $('meetingMode').addEventListener('change', event => setMode(event.target.value === 'debate'));
   $('workflowFlow').addEventListener('change',syncWorkflowDialog);
   $('closeWorkflowButton').addEventListener('click',()=>$('workflowDialog').close());
   $('saveWorkflowButton').addEventListener('click',()=>{

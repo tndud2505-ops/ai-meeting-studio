@@ -1,5 +1,7 @@
 # Roundtable — One Table for All Your AI CLIs
 
+> **한국어 AI 회의 앱 (이 저장소의 추가 기능)**: [회의 앱 설치 및 사용법](README_STUDIO.md) · Windows에서 `START_STUDIO.cmd` 실행 · Codex/Claude/Gemini 실제 CLI 로그인, PWA 채팅, 자동/순차/동시 조사, 프로젝트 작업 지원. 아래는 기반 Roundtable 프로젝트의 원본 설명입니다.
+
 **Group-chat your AI CLIs day to day; escalate to a structured debate committee when the decision matters.**
 
 [![Roundtable demo](docs/demo-en.gif)](docs/demo-en.mp4)

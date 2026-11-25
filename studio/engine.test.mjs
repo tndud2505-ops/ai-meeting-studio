@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MeetingEngine, publicRoom, buildPrompt, exportMarkdown, exportSrt, normalizeConfig } from './engine.mjs';
+import { chooseFlow, chooseCycleOrder, normalizeWorkflow, resolveWorkspace } from './workflow.mjs';
 
 const qaRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'qa');
 const ready=['codex','claude','gemini'].map(id=>({id,installed:true,auth:'ready'}));
@@ -30,6 +31,121 @@ async function settled(engine,id) {
   const pending=engine.jobs.get(id)?.promise;
   if(pending)await pending;
 }
+
+test('auto selects parallel research and sequential chat; project always serializes writers',()=>{
+  assert.equal(chooseFlow({flow:'auto',access:'research'},'플레이스토어 시장을 조사해줘'),'parallel');
+  assert.equal(chooseFlow({flow:'auto',access:'research'},'안녕, 아이디어를 이야기하자'),'sequential');
+  assert.equal(chooseFlow({flow:'parallel',access:'project'},'조사'),'sequential');
+  assert.throws(()=>normalizeWorkflow({access:'project',workspace:'relative/path'}),/절대 경로/);
+});
+
+test('auto rotates speakers and explicit mentions choose only the addressed participant',()=>{
+  assert.deepEqual(chooseCycleOrder(participants,{id:'m1',text:'회의 시작'},2,'auto'),['claude','gemini','codex']);
+  assert.deepEqual(chooseCycleOrder(participants,{id:'m2',text:'@Gemini 웹 조사해줘'},1,'auto'),['gemini']);
+  assert.deepEqual(chooseCycleOrder(participants,{id:'m2',text:'@Gemini 웹 조사해줘'},2,'auto','m2'),['claude','gemini','codex']);
+});
+
+test('a direct mention calls just the addressed provider without blocking on unselected authentication',{timeout:5000},async t=>{
+  const calls=[];
+  const {engine}=await fixture(t,{getProviders:async()=>ready.map(p=>p.id==='claude'?{...p,auth:'login_required'}:p),runProvider:async req=>{calls.push(req.provider);return {text:'확인'};}});
+  const room=await engine.create(config({userLed:true,flow:'auto',access:'research'}));
+  await engine.message(room.id,'@Codex 이 자료를 조사해줘');
+  await engine.start(room.id);await settled(engine,room.id);
+  assert.deepEqual(calls,['codex']);
+  assert.equal(room.cycleComplete,true);
+  assert.equal(room.config.participants.length,3);
+});
+
+test('parallel calls share only the initial snapshot; fast answers arrive first and reviews see all results',{timeout:5000},async t=>{
+  const gates=new Map(participants.map(p=>[p.id,deferred()]));
+  const allStarted=deferred(), calls=[];
+  const {engine}=await fixture(t,{runProvider:async req=>{
+    calls.push(req);
+    if(req.prompt.includes('독립 조사 단계:')){
+      if(calls.length===3)allStarted.resolve();
+      await gates.get(req.provider).promise;
+      return {text:'RESULT-'+req.provider,tools:['web']};
+    }
+    return {text:'REVIEW-'+req.provider};
+  }});
+  const room=await engine.create(config({userLed:true,flow:'parallel',access:'research'}));
+  await engine.message(room.id,'독립적으로 조사해줘');
+  await engine.start(room.id);
+  await allStarted.promise;
+  try{
+    assert.equal(calls.length,3);
+    assert.equal(room.messages.filter(m=>m.status==='streaming').length,3);
+    assert.ok(calls.every(req=>req.access==='research'&&!req.prompt.includes('RESULT-')));
+    gates.get('gemini').resolve();
+    for(let i=0;i<100&&!room.messages.some(m=>m.text==='RESULT-gemini'&&m.status==='complete');i++)await new Promise(r=>setTimeout(r,5));
+    assert.equal(room.messages.find(m=>m.kind==='speech'&&m.status==='complete')?.provider,'gemini');
+    await engine.message(room.id,'추가 조건: 2주 이내');
+  }finally{for(const gate of gates.values())gate.resolve();}
+  await settled(engine,room.id);
+  const review=calls.filter(r=>r.prompt.includes('상호 검토 단계:'));
+  assert.equal(review.length,3);
+  assert.ok(review.every(r=>participants.every(p=>r.prompt.includes('RESULT-'+p.id))&&r.prompt.includes('추가 조건')));
+  assert.equal(room.cycleComplete,true);
+  assert.equal(room.status,'paused');
+  assert.equal(room.nextTurn,6);
+});
+
+test('a failed parallel member can be retried without repeating successful research',{timeout:5000},async t=>{
+  let failed=false;const calls=[];
+  const {engine}=await fixture(t,{runProvider:async req=>{
+    const research=req.prompt.includes('독립 조사 단계:');
+    calls.push([req.provider,research]);
+    if(research&&req.provider==='claude'&&!failed){failed=true;throw new Error('test failure');}
+    return {text:'RESULT-'+req.provider};
+  }});
+  const room=await engine.create(config({userLed:true,flow:'parallel',access:'research'}));
+  await engine.message(room.id,'조사');
+  await engine.start(room.id);await settled(engine,room.id);
+  assert.equal(room.status,'error');
+  assert.equal(room.parallelPlan.researchDone.length,2);
+  await engine.start(room.id);await settled(engine,room.id);
+  assert.equal(room.status,'paused');assert.equal(room.cycleComplete,true);
+  assert.equal(calls.filter(([p,r])=>p==='codex'&&r).length,1);
+  assert.equal(calls.filter(([p,r])=>p==='claude'&&r).length,2);
+});
+
+test('pause during concurrent research waits for active requests and postpones review',{timeout:5000},async t=>{
+  const ready=deferred(),gate=deferred();let calls=0;
+  const {engine}=await fixture(t,{runProvider:async()=>{if(++calls===3)ready.resolve();await gate.promise;return {text:'답변'};}});
+  const room=await engine.create(config({userLed:true,flow:'parallel',access:'research'}));
+  await engine.message(room.id,'조사');await engine.start(room.id);await ready.promise;
+  try{await engine.pause(room.id);assert.equal(room.pausePending,true);}finally{gate.resolve();}
+  await settled(engine,room.id);
+  assert.equal(calls,3);assert.equal(room.parallelPlan.phase,'review');
+  await engine.start(room.id);await settled(engine,room.id);assert.equal(calls,6);
+});
+
+test('stop aborts all concurrent providers and never launches review',{timeout:5000},async t=>{
+  const ready=deferred();let calls=0,aborts=0;
+  const {engine}=await fixture(t,{runProvider:async req=>{
+    if(++calls===3)ready.resolve();
+    return new Promise((resolve,reject)=>req.signal.addEventListener('abort',()=>{aborts++;reject(new Error('aborted'));},{once:true}));
+  }});
+  const room=await engine.create(config({userLed:true,flow:'parallel',access:'research'}));
+  await engine.message(room.id,'조사');await engine.start(room.id);await ready.promise;
+  await engine.stop(room.id);await settled(engine,room.id);
+  assert.equal(aborts,3);assert.equal(calls,3);assert.equal(room.status,'stopped');
+  assert.equal(room.messages.filter(m=>m.status==='streaming').length,0);
+});
+
+test('project mode runs serially in the explicitly selected existing directory',{timeout:5000},async t=>{
+  const calls=[];let active=0,peak=0;
+  const {engine,temp}=await fixture(t,{runProvider:async req=>{calls.push(req);peak=Math.max(peak,++active);await new Promise(r=>setTimeout(r,10));active--;return {text:'검토 완료'};}});
+  const project=path.join(temp,'test-project');await mkdir(project);
+  const room=await engine.create(config({userLed:true,flow:'parallel',access:'project',workspace:project}));
+  await engine.message(room.id,'파일을 검토해줘');
+  await engine.start(room.id);await settled(engine,room.id);
+  assert.equal(peak,1);assert.equal(calls.length,3);
+  assert.ok(calls.every(r=>r.cwd===room.config.workspace&&r.access==='project'));
+  assert.ok(calls.every(r=>r.prompt.includes('사용자가 선택한 프로젝트')));
+  assert.equal(room.config.workspace,await resolveWorkspace(project));
+  await assert.rejects(resolveWorkspace(path.parse(project).root),/프로젝트 폴더/);
+});
 
 test('private mystery clues are isolated from public state, exports, broadcasts, and other participants',{timeout:5000},async t=>{
   const {engine,events}=await fixture(t);

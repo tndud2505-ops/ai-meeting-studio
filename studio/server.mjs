@@ -46,7 +46,7 @@ const server=http.createServer(async(req,res)=>{
   try{url=new URL(req.url,`http://127.0.0.1:${port}`);}catch{return json(res,400,{error:'잘못된 URL입니다.'});}
   const route=url.pathname;
   try{
-    if(req.method==='GET'&&route==='/health')return json(res,200,{app:'AI Meeting Studio',version:'2.1.0',pid:process.pid,port});
+    if(req.method==='GET'&&route==='/health')return json(res,200,{app:'AI Meeting Studio',version:'2.2.0',pid:process.pid,port});
     if(req.method==='GET'&&route==='/api/status')return json(res,200,{providers:await getProviders({refresh:url.searchParams.get('refresh')==='1'}),serverTime:new Date().toISOString()});
     if(req.method==='GET'&&route==='/api/rooms')return json(res,200,{rooms:engine.list()});
     if(req.method==='GET'&&route==='/api/roles')return json(res,200,{roles:await getRoles()});
@@ -61,7 +61,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='PUT'&&roleMatch){const input=await body(req);return json(res,200,{role:await saveRole(roleMatch[1],input.content)});}
     if(req.method==='POST'&&route==='/api/session/open'){
       const input=await body(req);
-      const room=await engine.create({title:'회의',topic:'함께 논의할 내용',mode:'meeting',rounds:1,turnDelayMs:400,wordLimit:90,userLed:true,participants:input.participants});
+      const room=await engine.create({title:'회의',topic:'함께 논의할 내용',mode:'meeting',rounds:1,turnDelayMs:400,wordLimit:90,userLed:true,participants:input.participants,...(input.workflow?{flow:input.workflow.flow,access:input.workflow.access,workspace:input.workflow.workspace}:{})});
       return json(res,201,{room:publicRoom(room)});
     }
     if(req.method==='POST'&&route==='/api/session/reset'){
@@ -106,9 +106,9 @@ const server=http.createServer(async(req,res)=>{
         const data=await body(req);let updated;
         if(['start','resume','next'].includes(action)){
           if(checks.size)throw new Error('연결 확인이 끝난 뒤 시작해 주세요.');
-          updated=await engine.start(id,{single:action==='next',participants:data.participants});
+          updated=await engine.start(id,{single:action==='next',participants:data.participants,workflow:data.workflow});
         }else if(action==='pause')updated=await engine.pause(id);
-        else if(action==='stop')updated=await engine.stop(id);
+        else if(action==='stop'){const job=engine.jobs.get(id);updated=await engine.stop(id);if(job?.promise)await job.promise;}
         else if(action==='message')updated=await engine.message(id,data.text);
         else throw new Error('지원하지 않는 동작입니다.');
         return json(res,200,{room:publicRoom(updated)});

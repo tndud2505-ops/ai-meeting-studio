@@ -143,7 +143,7 @@ function providerError(provider, raw = '', code) {
   let message = `${names[provider]} 실행에 실패했습니다. 연결 상태와 선택한 모델을 확인해 주세요.`;
   let kind = 'PROVIDER_ERROR';
   if (/aborted|aborterror|cancelled|canceled/i.test(text)) { message = '요청을 중지했습니다.'; kind = 'ABORTED'; }
-  else if (/timeout|timed out|시간 초과/i.test(text)) { message = `${names[provider]} 응답이 180초 안에 완료되지 않았습니다. 다시 실행하거나 추론 강도를 낮춰 주세요.`; kind = 'TIMEOUT'; }
+  else if (/timeout|timed out|시간 초과/i.test(text)) { message = `${names[provider]} 응답 제한 시간을 초과했습니다. 다시 실행하거나 추론 강도를 낮춰 주세요.`; kind = 'TIMEOUT'; }
   else if (/authentication required|not logged|not authenticated|login required|sign.?in|please log.?in|unauthorized|expired.*(?:token|credential)|401|invalid.*(?:token|credential)/i.test(text)) { message = `${names[provider]} 공식 CLI에서 구독 계정에 로그인한 뒤 다시 연결 확인을 눌러 주세요.`; kind = 'LOGIN_REQUIRED'; }
   else if (/quota|rate.?limit|usage.?limit|429|capacity|resource.?exhausted|credit|usage.*exceed|limit.*reached/i.test(text)) { message = `${names[provider]} 사용량 한도 또는 일시적인 처리 한도에 도달했습니다. 공식 CLI에서 한도를 확인한 뒤 다시 시도해 주세요.`; kind = 'RATE_LIMIT'; }
   else if (/unknown model|invalid model|model.*(?:not found|unsupported|not supported|not available|does not exist)|model_not_found/i.test(text)) { message = `${names[provider]}에서 선택한 모델을 사용할 수 없습니다. 계정에서 이용 가능한 모델을 선택해 주세요.`; kind = 'MODEL_UNAVAILABLE'; }
@@ -262,7 +262,15 @@ function safeUsage(value) {
 }
 
 function createParser(provider, onDelta = () => {}) {
-  const data = { text: '', delivered: '', final: '', success: false, failure: '', usage: undefined, model: '', items: new Map() };
+  const data = { text: '', delivered: '', final: '', success: false, failure: '', usage: undefined, model: '', items: new Map(), tools: new Set() };
+  function recordTool(name) {
+    // Record only known tool categories. Never persist tool inputs, commands,
+    // model reasoning or raw CLI events.
+    if(typeof name!=='string')return;
+    if(/^(web_search|websearch|webfetch|read_url_content|search_web|read_url|web_fetch)$/i.test(name))data.tools.add('web');
+    else if(/^(command_execution|run_command|bash|powershell|terminal_command)$/i.test(name))data.tools.add('terminal');
+    else if(/^(file_change|read_file|write_file|list_directory|grep_search|view_file|read|glob|grep|edit|write|multi_edit|replace_file_content)$/i.test(name))data.tools.add('files');
+  }
   function publish(text) {
     if (text.length > MAX_ANSWER) throw new Error('CLI output limit exceeded');
     data.text = text;
@@ -277,6 +285,7 @@ function createParser(provider, onDelta = () => {}) {
     if (provider === 'codex') {
       if (event.type === 'item.completed' || event.type === 'item.updated') {
         const item = event.item;
+        if(event.type==='item.completed')recordTool(item?.type);
         if (item?.type === 'agent_message' && typeof item.text === 'string' && item.phase !== 'commentary') {
           data.items.set(item.id || 'answer', item.text);
           publish([...data.items.values()].join('\n\n'));
@@ -289,6 +298,7 @@ function createParser(provider, onDelta = () => {}) {
       if (event.type === 'system' && event.subtype === 'init') data.model = String(event.model || '');
       if (event.type === 'stream_event' && event.event?.type === 'content_block_delta' && event.event.delta?.type === 'text_delta') publish(data.text + (event.event.delta.text || ''));
       if (event.type === 'assistant' && event.message?.content) {
+        for(const block of event.message.content)if(block.type==='tool_use')recordTool(block.name);
         const text = event.message.content.filter(block => block.type === 'text').map(block => block.text || '').join('\n');
         if (text) publish(text);
         if (event.message.model) data.model = event.message.model;
@@ -300,6 +310,12 @@ function createParser(provider, onDelta = () => {}) {
         data.usage = safeUsage(event.usage);
       }
     } else {
+      if(event.event==='step_update'){
+        const step=event.step_update||{};
+        recordTool(step.step_type);
+        recordTool(step.tool_name);
+        recordTool(step.tool?.name);
+      }
       if (event.event === 'step_update' && event.step_update?.step_type === 'agent_response') {
         const step = event.step_update;
         if (typeof step.text_delta === 'string') {
@@ -426,25 +442,31 @@ export async function getProviders({ refresh = false } = {}) {
   return structuredClone(await discoveryPromise);
 }
 
-function buildInvocation(provider, model, effort, prompt) {
+function buildInvocation(provider, model, effort, prompt, access = 'chat') {
+  if(!['chat','research','project'].includes(access))throw new Error('지원하지 않는 도구 모드입니다.');
+  const project=access==='project', web=access!=='chat';
   if (provider === 'codex') {
-    const args = ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '--sandbox', 'read-only',
-      '-c', 'approval_policy="never"', '-c', 'features.shell_tool=false', '-c', 'features.hooks=false', '-c', 'features.apps=false', '-c', 'features.multi_agent=false',
-      '-c', 'features.view_image=false', '-c', 'web_search="disabled"', '-c', 'hide_agent_reasoning=true', '-c', 'model_reasoning_summary="none"'];
+    const args = ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config', '--sandbox', project?'workspace-write':'read-only',
+      '-c', 'approval_policy="never"', '-c', 'features.shell_tool='+String(project), '-c', 'features.hooks=false', '-c', 'features.apps=false', '-c', 'features.multi_agent=false',
+      '-c', 'features.view_image='+String(project), '-c', web?'web_search="live"':'web_search="disabled"', '-c', 'hide_agent_reasoning=true', '-c', 'model_reasoning_summary="none"'];
     if (model) args.push('--model', model);
     if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
     args.push('-');
     return { args, input: prompt };
   }
   if (provider === 'claude') {
-    const args = ['--safe-mode', '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', '',
+    const args = ['--safe-mode', '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', project?'Read,Glob,Grep,Edit,Write,Bash,PowerShell,WebSearch,WebFetch':web?'WebSearch,WebFetch':'',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands', '--no-session-persistence'];
+    if(web)args.push('--restricted','--permission-mode',project?'acceptEdits':'dontAsk','--permission-prompts','none','--allowedTools','WebSearch,WebFetch');
     if (model) args.push('--model', model);
     if (effort) args.push('--effort', effort);
     return { args, input: prompt };
   }
-  const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--print-timeout', '180s', '--disable-slash-commands',
-    '--settings', JSON.stringify({ agentMode: '', toolPermission: 'request-review', permissions: { deny: ['command(*)', 'read_file(*)', 'write_file(*)', 'mcp(*)', 'read_url(*)', 'execute_url(*)'] } })];
+  const deny=project?['mcp(*)','execute_url(*)']:['command(*)','read_file(*)','write_file(*)','mcp(*)','execute_url(*)',...(web?[]:['read_url(*)'])];
+  const settings={agentMode:project?'accept-edits':'',toolPermission:project?'proceed-in-sandbox':'request-review',permissions:{deny,...(web?{allow:['read_url(*)']}: {})}};
+  const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--print-timeout', project?'600s':web?'360s':'180s', '--disable-slash-commands',
+    '--settings', JSON.stringify(settings)];
+  if(project)args.push('--sandbox','--mode','accept-edits');
   if (model) args.push('--model', model);
   if (effort) args.push('--effort', effort);
   return { args, input: JSON.stringify({ event: 'user', message: { content: prompt } }) + '\n' };
@@ -457,7 +479,7 @@ function cacheUpdate(provider, auth, message) {
   if (descriptor) { descriptor.auth = auth; descriptor.message = message; if (auth === 'login_required') descriptor.authStatus = 'required'; }
 }
 
-export async function runProvider({ provider, model = '', effort = 'medium', prompt, cwd, signal, onDelta } = {}) {
+export async function runProvider({ provider, model = '', effort = 'medium', prompt, cwd, signal, onDelta, access = 'chat' } = {}) {
   validProvider(provider);
   model = validModel(model);
   effort = validEffort(effort);
@@ -476,15 +498,15 @@ export async function runProvider({ provider, model = '', effort = 'medium', pro
   // variant explicitly so the UI and actual invocation agree.
   if (provider === 'gemini' && effort && selected?.efforts.includes(effort) && /-(low|medium|high|xhigh|max)$/.test(model)) model = model.replace(/-(low|medium|high|xhigh|max)$/, '-' + effort);
   const parser = createParser(provider, onDelta);
-  const invocation = buildInvocation(provider, model, effort, prompt);
+  const invocation = buildInvocation(provider, model, effort, prompt, access);
   try {
-    const result = await execute(record.cli, invocation.args, { cwd, input: invocation.input, signal, onLine: parser.line });
+    const result = await execute(record.cli, invocation.args, { cwd, input: invocation.input, signal, onLine: parser.line, timeout:access==='project'?610000:access==='research'?370000:TIMEOUT_MS });
     const answer = (parser.data.final || parser.data.text).trim();
     if (result.code !== 0 || parser.data.failure || !parser.data.success || !answer) {
       throw providerError(provider, parser.data.failure || result.stderr || 'CLI returned no successful answer', result.code);
     }
     cacheUpdate(provider, 'ready', `${names[provider]} 실제 응답 확인 완료`);
-    return { text: answer, model: parser.data.model || model || 'CLI 기본 모델', modelSource: parser.data.model ? 'cli' : 'requested', effort: effort || 'default', usage: parser.data.usage, durationMs: result.durationMs };
+    return { text: answer, model: parser.data.model || model || 'CLI 기본 모델', modelSource: parser.data.model ? 'cli' : 'requested', effort: effort || 'default', usage: parser.data.usage, durationMs: result.durationMs, tools:[...parser.data.tools] };
   } catch (error) {
     const safe = error.code && ['ABORTED', 'TIMEOUT', 'LOGIN_REQUIRED', 'RATE_LIMIT', 'MODEL_UNAVAILABLE', 'EFFORT_UNAVAILABLE', 'CLI_INCOMPATIBLE', 'MISSING', 'NETWORK_ERROR', 'PROVIDER_ERROR'].includes(error.code) ? error : providerError(provider, error.message);
     if (safe.code === 'LOGIN_REQUIRED') cacheUpdate(provider, 'login_required', safe.message);

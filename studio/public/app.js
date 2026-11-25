@@ -15,6 +15,13 @@
   const CONFIG_KEY = 'meeting-notes-participants-v2';
   const ROOM_KEY = 'ai-meeting-studio-selected-room-v1';
   const DRAFT_KEY = 'meeting-notes-composer-v2';
+  const WORKFLOW_KEY = 'meeting-workflow-v1';
+  let workflow={flow:'auto',access:'research',workspace:''};
+  let approvedWorkspace='';
+  try {const stored=JSON.parse(localStorage.getItem(WORKFLOW_KEY)||'null');if(stored)workflow={...workflow,...stored};}catch{}
+  if(!['auto','sequential','parallel'].includes(workflow.flow))workflow.flow='auto';
+  if(!['chat','research','project'].includes(workflow.access))workflow.access='research';
+  if(typeof workflow.workspace!=='string')workflow.workspace='';
   let savedConfig = false;
   let participants = IDS.map(provider => ({ id: provider, provider, name: NAMES[provider], model: '', effort: '', enabled: true }));
   try {
@@ -90,6 +97,27 @@
   }
   function requestParticipants() {
     return participants.map(p => ({ id: p.id, provider: p.provider, name: profile(p.provider).displayName, model: p.model || '', effort: p.effort || '', enabled: p.enabled !== false }));
+  }
+  function workflowOptions(){
+    if(workflow.access==='project'){
+      const workspace=workflow.workspace.trim();
+      if(!workspace)throw new Error('진행 설정에서 프로젝트 폴더를 지정해주세요.');
+      if(approvedWorkspace!==workspace){
+        if(!window.confirm('선택한 프로젝트에서 AI의 파일 읽기·편집·터미널 및 웹 도구 사용을 허용할까요?\n\n'+workspace+'\n\n공식 CLI의 권한 제한은 유지됩니다.'))throw new Error('프로젝트 작업을 취소했습니다.');
+        approvedWorkspace=workspace;
+      }
+    }
+    return {...workflow};
+  }
+  function renderWorkflow(){
+    $('workflowLabel').textContent=({auto:'자동',sequential:'순차',parallel:'동시'})[workflow.access==='project'?'sequential':workflow.flow]+' · '+({chat:'대화',research:'웹',project:'작업'})[workflow.access];
+    $('workflowButton').title=workflow.access==='project'?workflow.workspace:'진행 및 도구 설정';
+  }
+  function syncWorkflowDialog(){
+    const project=$('workflowAccess').value==='project';
+    $('workspaceFields').hidden=!project;
+    $('workflowFlow').disabled=project;
+    $('workflowHint').hidden=project;
   }
   function effortLabel(value) {
     return ({ default: '기본값', auto: '자동', minimal: '최소', low: '낮음', medium: '보통', high: '높음', xhigh: '매우 높음', max: '최대', ultra: 'Ultra' })[value] || value;
@@ -463,7 +491,7 @@
     if (state.sessionPromise) return state.sessionPromise;
     validateParticipants(false);
     state.sessionPromise = (async () => {
-      const data = await api('/api/session/open', { participants: requestParticipants() });
+      const data = await api('/api/session/open', { participants: requestParticipants(), workflow:workflowOptions() });
       if (!data.room) throw new Error('세션을 열지 못했습니다.');
       selectRoom(data.room, true);
       return data.room;
@@ -484,9 +512,9 @@
         const room = await ensureSession();
         const hasMessage = (room.messages || []).some(m => m.kind === 'user' && m.text?.trim());
         if (!hasMessage) { $('messageInput').focus(); return; }
-        validateParticipants(true);
+        validateParticipants(false);
         const action = ['paused', 'error'].includes(room.status) ? 'resume' : 'start';
-        const data = await api('/api/rooms/' + encodeURIComponent(room.id) + '/' + action, { participants: requestParticipants() });
+        const data = await api('/api/rooms/' + encodeURIComponent(room.id) + '/' + action, { participants: requestParticipants(), workflow:workflowOptions() });
         if (data.room) selectRoom(data.room);
       }
     } catch (error) { showError(error.message); }
@@ -509,11 +537,11 @@
       if (data.room && state.room?.id === room.id) selectRoom(data.room);
       scrollToLatest(true);
       const savedRoom = state.room;
-      const canRespond = savedRoom?.status === 'idle' || savedRoom?.status === 'error' || savedRoom?.status === 'paused' && savedRoom.cycleComplete === true;
+      const canRespond = savedRoom?.status === 'idle' || savedRoom?.status === 'error' || savedRoom?.status === 'stopped' || savedRoom?.status === 'paused' && savedRoom.cycleComplete === true;
       if (!generatingWhenSent && savedRoom?.id === room.id && !isRunning() && canRespond) {
-        validateParticipants(true);
+        validateParticipants(false);
         const action = ['paused', 'error'].includes(savedRoom.status) ? 'resume' : 'start';
-        const response = await api('/api/rooms/' + encodeURIComponent(room.id) + '/' + action, { participants: requestParticipants() });
+        const response = await api('/api/rooms/' + encodeURIComponent(room.id) + '/' + action, { participants: requestParticipants(), workflow:workflowOptions() });
         if (response.room && state.room?.id === room.id) selectRoom(response.room);
       }
     } catch (error) { showError(error.message); }
@@ -599,9 +627,15 @@
       const content = el('div', 'message-content');
       const nameNode = el('span', 'message-name' + (isUser ? ' sr-only' : ''), message.name || person.displayName);
       if (message.model) nameNode.title = NAMES[message.provider] + ' · ' + message.model + (message.effort ? ' · ' + effortLabel(message.effort) : '');
+      if(message.phase&&!isUser&&!isSystem)nameNode.append(el('span','phase-label',message.phase==='research'?'조사':'검토'));
+      if(message.tools?.length&&!isUser&&!isSystem){const labels={web:'웹',terminal:'터미널',files:'파일'};nameNode.title+=(nameNode.title?' · ':'')+'CLI 도구 이벤트: '+message.tools.map(t=>labels[t]).filter(Boolean).join(', ');}
       const bubbleRow = el('div', 'bubble-row');
       const bubble = el('div', 'message-bubble');
       const text = el('div', 'message-text', message.text || '');
+      if(message.status==='complete'&&!isUser&&!isSystem){
+        const parts=(message.text||'').split(/(https?:\/\/[^\s<>"'\x60)\]]+)/g);
+        if(parts.length>1){text.replaceChildren();for(const part of parts){if(/^https?:\/\//i.test(part)){const link=el('a','source-link',part);link.href=part;link.target='_blank';link.rel='noopener noreferrer';text.append(link);}else text.append(document.createTextNode(part));}}
+      }
       if (waiting) {
         const dots = el('span', 'typing-dots');
         dots.setAttribute('role', 'status');
@@ -641,6 +675,7 @@
     $('messageInput').disabled = state.applyingUpdate;
     $('updateButton').hidden = !state.waitingWorker || running;
     $('updateButton').disabled = state.applyingUpdate || state.busy || state.sending;
+    $('workflowButton').disabled=running||state.busy||state.sending;
     if ($('settingsDialog').open) renderConnection();
   }
   function resizeComposer() {
@@ -738,6 +773,20 @@
   }
 
   buildModelBar();
+  renderWorkflow();
+  $('workflowButton').addEventListener('click',()=>{
+    $('workflowFlow').value=workflow.flow;$('workflowAccess').value=workflow.access;$('workspaceInput').value=workflow.workspace;
+    syncWorkflowDialog();$('workflowDialog').showModal();
+  });
+  $('workflowAccess').addEventListener('change',syncWorkflowDialog);
+  $('closeWorkflowButton').addEventListener('click',()=>$('workflowDialog').close());
+  $('saveWorkflowButton').addEventListener('click',()=>{
+    const next={flow:$('workflowFlow').value,access:$('workflowAccess').value,workspace:$('workspaceInput').value.trim()};
+    if(next.access==='project'&&!next.workspace){$('workspaceInput').focus();return;}
+    if(next.workspace!==workflow.workspace||next.access!==workflow.access)approvedWorkspace='';
+    workflow=next;try{localStorage.setItem(WORKFLOW_KEY,JSON.stringify(workflow));}catch{}
+    renderWorkflow();$('workflowDialog').close();
+  });
   $('startButton').addEventListener('click', startOrPause);
   $('resetButton').addEventListener('click', resetSession);
   $('composerForm').addEventListener('submit', event => { event.preventDefault(); sendMessage(); });

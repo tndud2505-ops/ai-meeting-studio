@@ -33,6 +33,34 @@ test('Antigravity permissions are session-only and do not force plan output', ()
   assert.equal(settings.agentMode, '');
 });
 
+test('research enables only public web tools and project mode enables workspace tools without permission bypass',()=>{
+  for(const provider of ['codex','claude','gemini']){
+    const research=t.buildInvocation(provider,'','low','query','research').args;
+    const project=t.buildInvocation(provider,'','low','query','project').args;
+    assert.ok(!project.some(a=>a.includes('dangerously')||a==='bypassPermissions'||a==='danger-full-access'));
+    if(provider==='codex'){
+      assert.ok(research.includes('web_search="live"'));assert.ok(research.includes('features.shell_tool=false'));
+      assert.ok(project.includes('workspace-write'));assert.ok(project.includes('features.shell_tool=true'));
+    }else if(provider==='claude'){
+      assert.equal(research[research.indexOf('--tools')+1],'WebSearch,WebFetch');
+      assert.ok(project.includes('--restricted'));assert.match(project[project.indexOf('--tools')+1],/Read.*Edit.*Bash/);
+    }else{
+      const s=JSON.parse(research[research.indexOf('--settings')+1]);assert.ok(s.permissions.allow.includes('read_url(*)'));assert.ok(s.permissions.deny.includes('command(*)'));
+      assert.ok(project.includes('--sandbox'));assert.ok(!JSON.parse(project[project.indexOf('--settings')+1]).permissions.deny.includes('write_file(*)'));
+    }
+  }
+});
+
+test('tool evidence stores only categories, never tool arguments',()=>{
+  const p=t.createParser('codex');
+  p.consume({type:'item.completed',item:{type:'web_search',query:'SECRET'}});
+  p.consume({type:'item.completed',item:{type:'command_execution',command:'PRIVATE'}});
+  assert.deepEqual([...p.data.tools],['web','terminal']);
+  assert.ok(!JSON.stringify(p.data).includes('SECRET'));
+  const q=t.createParser('claude');q.consume({type:'assistant',message:{content:[{type:'tool_use',name:'WebFetch',input:{url:'private'}}]}});
+  assert.deepEqual([...q.data.tools],['web']);
+});
+
 test('Codex emits only answer text once and ignores reasoning/commentary', () => {
   const deltas = [];
   const p = t.createParser('codex', delta => deltas.push(delta));

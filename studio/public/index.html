@@ -37,12 +37,21 @@
       <div class="error-line" id="errorLine" role="alert" hidden><span id="errorText"></span><button id="dismissErrorButton" type="button" aria-label="오류 메시지 닫기">×</button></div>
       <form id="composerForm" class="composer">
         <button id="userProfileButton" class="composer-profile avatar-button" type="button" aria-label="내 프로필 설정" title="내 프로필"></button>
+        <button id="workflowButton" class="workflow-button" type="button" aria-label="진행 및 도구 설정" title="진행 및 도구 설정"><span aria-hidden="true">⚙</span><span id="workflowLabel">자동 · 웹</span></button>
         <label class="sr-only" for="messageInput">메시지 입력</label>
         <textarea id="messageInput" rows="1" maxlength="6000" placeholder="메시지 입력" autocomplete="off"></textarea>
         <button id="sendButton" class="send-button" type="submit" aria-label="메시지 보내기" title="보내기"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </form>
     </div>
   </main>
+  <dialog id="workflowDialog" class="settings-dialog" aria-labelledby="workflowTitle">
+    <div class="settings-heading"><h2 id="workflowTitle">진행 설정</h2><button id="closeWorkflowButton" class="plain-icon" type="button" aria-label="진행 설정 닫기">×</button></div>
+    <label class="settings-field">대화 방식<select id="workflowFlow"><option value="auto">자동 선택</option><option value="sequential">순차 대화</option><option value="parallel">동시 조사 후 토론</option></select></label>
+    <label class="settings-field">도구 권한<select id="workflowAccess"><option value="chat">대화만</option><option value="research">웹 검색 및 자료 조사</option><option value="project">프로젝트 파일 · 터미널 · 웹</option></select></label>
+    <div id="workspaceFields" hidden><label class="settings-field">프로젝트 폴더<input id="workspaceInput" type="text" maxlength="1024" placeholder="C:\Projects\MyApp" autocomplete="off"></label><p class="workflow-note">신뢰하는 프로젝트만 선택하세요. 파일 변경 충돌 방지를 위해 순차 실행합니다. 공식 CLI 권한 및 샌드박스가 적용되며 추가 승인이 필요한 작업은 실행되지 않을 수 있습니다.</p></div>
+    <p id="workflowHint" class="workflow-note">동시 조사 결과가 먼저 도착한 순서로 표시되고, 모두 완료되면 서로 검토합니다.</p>
+    <div class="settings-footer"><span></span><button id="saveWorkflowButton" class="dark-button" type="button">저장</button></div>
+  </dialog>
   <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle">
     <div class="settings-heading"><div><span id="settingsProviderLabel" class="settings-provider-label"></span><h2 id="settingsTitle">프로필</h2></div><button id="closeSettingsButton" class="plain-icon" type="button" aria-label="설정 닫기">×</button></div>
     <div class="settings-tabs" role="tablist" aria-label="설정">

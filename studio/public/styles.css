@@ -90,6 +90,14 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 .composer { display: flex; align-items: flex-end; gap: 13px; min-height: 58px; width: 100%; padding: 9px 10px 9px 11px; border: 1px solid #e1dcd3; border-radius: 15px; background: white; }
 .composer-profile { width: 36px; height: 36px; border-radius: 50%; margin-bottom: 1px; }
 .composer-profile .avatar-glyph { font-size: 22px; }
+.workflow-button { display:flex;align-items:center;gap:5px;flex-shrink:0;height:36px;padding:0 8px;border:0;border-radius:8px;background:#f7f5ef;color:#797264;font-size:11px;white-space:nowrap; }
+.workflow-button span:first-child{font-size:16px}
+.workflow-button:hover:not(:disabled){background:#efebe2}
+.workflow-button:disabled{opacity:.55}
+.workflow-note{font-size:12px;color:#867c6a;line-height:1.7;overflow-wrap:anywhere}
+.phase-label{font-weight:400;font-size:10px;color:#a19a90;margin-left:7px}
+.source-link{color:#5e7163;text-decoration:underline;overflow-wrap:anywhere}
+@media(max-width:520px){.workflow-button{width:30px;height:34px;padding:0;justify-content:center}.workflow-button #workflowLabel{display:none}}
 .composer textarea { display: block; flex: 1; min-width: 0; min-height: 36px; max-height: 180px; padding: 6px 0; border: 0; outline: none; box-shadow: none; resize: none; background: transparent; color: var(--ink); font-size: 15px; line-height: 1.6; overflow-y: auto; }
 .composer textarea:focus-visible { outline: none; }
 .composer textarea::placeholder { color: #aba399; opacity: 1; }

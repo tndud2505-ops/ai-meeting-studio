@@ -3,10 +3,12 @@ import path from 'node:path';
 import { randomUUID, randomInt } from 'node:crypto';
 import { redact } from '../src/redactor.js';
 import { normalizeWorkflow, resolveWorkspace, chooseFlow, chooseCycleOrder, cycleMembers, phaseInstruction, newParallelPlan, runParallelCycle } from './workflow.mjs';
+import { currentSettings, answerStyleRule } from './settings.mjs';
 
 export const MODES = ['meeting', 'debate', 'story', 'mystery'];
 const PROVIDERS = ['codex', 'claude', 'gemini'];
 const now = () => new Date().toISOString();
+const STANCE_RE = /\s*\[?\s*입장\s*[:：]\s*(합의|계속)\s*\]?\s*$/;
 const clean = (x, limit = 2000) => String(x ?? '').replaceAll('\0', '').trim().slice(0, limit);
 const cleanName = value => [...String(value ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim()].slice(0, 40).join('');
 const bounded = (x, fallback, min, max) => Number.isFinite(Number(x)) ? Math.max(min, Math.min(max, Math.round(Number(x)))) : fallback;
@@ -95,9 +97,17 @@ export function buildPrompt(room, participant, phase = '') {
       : '';
   let output=rule?finalPrompt.replace('코딩 작업이 아니라 한국어로 진행하는 대화이며, 파일이나 터미널, 웹, 외부 도구를 사용하지 마세요.',rule):finalPrompt;
   if(access==='project')output+='\n가능하면 기본 파일 읽기·편집 도구를 먼저 사용하세요. 터미널은 빌드·테스트 등 필요한 작업에 사용하고, 샌드박스 권한이 거부되면 우회하지 말고 다른 허용된 도구를 사용하거나 사용자에게 알려주세요.';
-  if(phase)output=phaseInstruction(phase)+'\n\n'+output;
+  const isDebate=phase==='debate'||phase==='debate-final';
+  if(isDebate){
+    output=output.replace(/사용자와 AI들이 함께 하는 자유로운 아이디어 회의입니다\.[\s\S]*?사용자가 이어서 말할 여지를 남기세요\./,'사용자 개입 없이 AI 참가자끼리 토론해 스스로 결론을 내는 자동 토론입니다. 사용자의 요청(주제)과 앞선 발언의 구체적 주장에 동의·반박·수정으로 반응하고, 쟁점을 좁혀 최선의 결론을 찾으세요.');
+    if(room.debate)output=output.replace('사용자가 참여하는 자유 대화. 이번 발언자는 '+participant.name+'입니다.','AI 자동 토론 '+Math.min(room.debate.max,Math.floor((room.nextTurn-room.cycleStartTurn)/Math.max(1,cycleMembers(room).length))+1)+'/최대 '+room.debate.max+'라운드. 이번 발언자는 '+participant.name+'입니다.');
+    if(phase==='debate-final')output=output.replace('발언은 한국어 약 '+room.config.wordLimit+'어절 이내','발언은 한국어 약 150어절 이내');
+  }
+  if(phase)output=phaseInstruction(phase,room.debate?.reason)+'\n\n'+output;
   if(phase==='research')output=output.replace('발언은 한국어 약 '+room.config.wordLimit+'어절 이내','발언은 필요한 조사 근거와 출처를 포함해 한국어 약 300어절 이내');
   if(phase==='review')output=output.replace('발언은 한국어 약 '+room.config.wordLimit+'어절 이내','발언은 핵심 비교와 우선순위를 포함해 한국어 약 180어절 이내');
+  if(phase!=='debate-final')output+=answerStyleRule(currentSettings().answerStyle,access);
+  if(phase==='debate')output+='\n마지막 줄에 [입장: 합의] 또는 [입장: 계속] 중 하나를 반드시 적으세요.';
   return { prompt:output, contextInfo:{ included:selected.length, total:completed.length, truncated:selected.length < completed.length } };
 }
 
@@ -216,7 +226,8 @@ export class MeetingEngine {
       room.lastCycleUserId=latest?.id;
       room.effectiveFlow=room.cycleOrder.length<2?'sequential':chooseFlow(room.config,latest?.text||'');
       room.parallelPlan=room.effectiveFlow==='parallel'?newParallelPlan(room):null;
-      room.cycleEndTurn=room.nextTurn+room.cycleOrder.length*(room.parallelPlan?2:1);room.cycleComplete=false;
+      room.debate=room.effectiveFlow==='debate'?{max:room.config.maxRounds||5,final:false,reason:'',rounds:0}:null;
+      room.cycleEndTurn=room.nextTurn+room.cycleOrder.length*(room.debate?room.debate.max:room.parallelPlan?2:1)+(room.debate?1:0);room.cycleComplete=false;
     }
     const controller=new AbortController();
     const job={controller,single,pauseRequested:false,promise:null};
@@ -236,19 +247,21 @@ export class MeetingEngine {
     return room;
   }
   async loop(room,job) {
-    const total=room.config.userLed?room.cycleEndTurn:room.config.rounds*room.config.participants.length;
+    let total=room.config.userLed?room.cycleEndTurn:room.config.rounds*room.config.participants.length;
     while(room.nextTurn<total && !job.controller.signal.aborted) {
       if(job.pauseRequested)break;
       await this.refreshProfiles(room);
       if(job.controller.signal.aborted || job.pauseRequested)break;
       const members=cycleMembers(room);
-      const participant={...members[(room.nextTurn-(room.config.userLed?room.cycleStartTurn:0))%members.length]};
-      const round=room.config.userLed?room.cycleNumber:Math.floor(room.nextTurn/room.config.participants.length)+1;
+      const debate=room.config.userLed?room.debate:null;
+      const phase=debate?(debate.final?'debate-final':'debate'):'';
+      const participant={...(debate?.final?members[0]:members[(room.nextTurn-(room.config.userLed?room.cycleStartTurn:0))%members.length])};
+      const round=debate?Math.min(debate.max,Math.floor((room.nextTurn-room.cycleStartTurn)/members.length)+1):room.config.userLed?room.cycleNumber:Math.floor(room.nextTurn/room.config.participants.length)+1;
       let role;
       if(this.roleResolver && room.config.userLed){role=await this.roleResolver(participant.provider);participant.persona=role.content;}
       if(job.controller.signal.aborted || job.pauseRequested)break;
-      const {prompt,contextInfo}=buildPrompt(room,participant);
-      const message={id:randomUUID(),participantId:participant.id,provider:participant.provider,profileId:participant.provider,name:participant.name,kind:'speech',text:'',round,status:'streaming',startedAt:now(),completedAt:null,model:participant.model,effort:participant.effort,contextInfo,roleFile:role?.filename,roleHash:role?.hash};
+      const {prompt,contextInfo}=buildPrompt(room,participant,phase);
+      const message={id:randomUUID(),participantId:participant.id,provider:participant.provider,profileId:participant.provider,name:participant.name,kind:'speech',text:'',round,...(phase?{phase,cycle:room.cycleNumber}:{}),status:'streaming',startedAt:now(),completedAt:null,model:participant.model,effort:participant.effort,contextInfo,roleFile:role?.filename,roleHash:role?.hash};
       room.round=round;room.currentSpeaker=participant.id;room.messages.push(message);this.emit(room);await this.save(room);
       try {
         const cwd=room.config.access==='project'?room.config.workspace:path.join(this.workDir,room.id,participant.id);if(room.config.access!=='project')await mkdir(cwd,{recursive:true});
@@ -260,7 +273,9 @@ export class MeetingEngine {
         if(job.controller.signal.aborted)throw new Error('사용자가 진행을 중지했습니다.');
         if(!result.text?.trim())throw new Error('AI가 표시할 응답을 반환하지 않았습니다.');
         message.text=redact(result.text);message.status='complete';message.completedAt=now();message.model=result.model||message.model;message.effort=result.effort||message.effort;message.durationMs=result.durationMs;message.usage=result.usage;message.tools=(result.tools||[]).filter(t=>['web','terminal','files'].includes(t));
-        room.nextTurn++;room.currentSpeaker=null;room.updatedAt=now();await this.save(room);this.emit(room);
+        room.nextTurn++;room.currentSpeaker=null;room.updatedAt=now();
+        if(phase){this.judgeDebate(room,message,phase,members.length);total=room.cycleEndTurn;}
+        await this.save(room);this.emit(room);
       } catch(error) {
         message.status='error';message.error=redact(error.message);message.completedAt=now();room.currentSpeaker=null;
         room.status=job.controller.signal.aborted?'stopped':'error';room.pausePending=false;room.error=message.error;room.updatedAt=now();await this.save(room);this.emit(room);return;
@@ -283,7 +298,23 @@ export class MeetingEngine {
     } else room.status='paused';
     room.updatedAt=now();await this.save(room);this.emit(room);
   }
+  // Reads the stance marker, hides it from the visible text, and decides whether
+  // the debate is finished (everyone agreed in a full round, or the cap was hit).
+  judgeDebate(room,message,phase,n) {
+    const d=room.debate;if(!d)return;
+    const found=String(message.text).match(STANCE_RE);
+    if(found){message.stance=found[1]==='합의'?'agree':'continue';message.text=message.text.replace(STANCE_RE,'').trimEnd();}
+    if(phase!=='debate'||d.final)return;
+    const done=room.nextTurn-room.cycleStartTurn;
+    if(done%n!==0)return;
+    const rounds=done/n;
+    const last=room.messages.filter(m=>m.kind==='speech'&&m.phase==='debate'&&m.cycle===room.cycleNumber&&m.status==='complete').slice(-n);
+    const agreed=rounds>=Math.min(2,d.max)&&last.length===n&&last.every(m=>m.stance==='agree');
+    d.rounds=rounds;
+    if(agreed||rounds>=d.max){d.final=true;d.reason=agreed?'agreed':'max';room.cycleEndTurn=room.nextTurn+1;}
+  }
   async pause(id) {
+
     const room=this.get(id),job=this.jobs.get(id);
     if(job) {job.pauseRequested=true;room.status='paused';room.pausePending=true;}
     else if(room.status!=='completed')room.status='paused';

@@ -25,6 +25,7 @@
     <div class="header-actions">
       <button id="installButton" class="plain-icon" type="button" title="앱 설치" aria-label="앱 설치" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4M5 15v5h14v-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <button id="updateButton" class="plain-icon" type="button" title="앱 업데이트" aria-label="앱 업데이트" hidden>↻</button>
+      <button id="appSettingsButton" class="plain-icon" type="button" title="전체 설정" aria-label="전체 설정"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="15" cy="7" r="2" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="17" r="2" stroke="currentColor" stroke-width="1.6"/></svg></button>
       <button id="startButton" class="action-button primary" type="button"><span id="startIcon" aria-hidden="true">▶</span><span id="startText">시작</span></button>
       <button id="resetButton" class="action-button reset-button" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.7 8A8 8 0 1 1 4 13M4.5 3.5V8H9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>초기화</span></button>
     </div>
@@ -44,9 +45,24 @@
       </form>
     </div>
   </main>
+  <dialog id="appSettingsDialog" class="settings-dialog" aria-labelledby="appSettingsTitle">
+    <div class="settings-heading"><h2 id="appSettingsTitle">전체 설정</h2><button id="closeAppSettingsButton" class="plain-icon" type="button" aria-label="전체 설정 닫기">×</button></div>
+    <div class="settings-field">
+      <div class="range-head"><label for="fontScaleInput">대화 글자 크기</label><span><output id="fontScaleValue" for="fontScaleInput">100%</output> <button id="fontScaleReset" class="text-button" type="button">기본값</button></span></div>
+      <input id="fontScaleInput" type="range" min="85" max="150" step="5" value="100">
+      <p id="fontPreview" class="font-preview">가나다 Aa 이 크기로 대화가 표시됩니다.</p>
+    </div>
+    <label class="settings-field">답변 길이<select id="answerStyleSelect"><option value="brief">핵심만 (기본)</option><option value="normal">보통</option><option value="detailed">자세히</option></select></label>
+    <p class="workflow-note settings-note">AI에게 전달하는 규칙입니다. 다음 답변부터 적용되며 각 AI의 역할 md보다 우선합니다.</p>
+    <label class="enabled-label"><span>메시지 시간 표시</span><input id="showTimeInput" type="checkbox"></label>
+    <label class="enabled-label"><span>새 답변이 오면 자동으로 아래로 이동</span><input id="autoScrollInput" type="checkbox"></label>
+    <div class="settings-error" id="appSettingsError" role="alert" hidden></div>
+    <div class="settings-footer"><span id="appSettingsState" role="status"></span><button id="doneAppSettingsButton" class="dark-button" type="button">닫기</button></div>
+  </dialog>
   <dialog id="workflowDialog" class="settings-dialog" aria-labelledby="workflowTitle">
     <div class="settings-heading"><h2 id="workflowTitle">진행 설정</h2><button id="closeWorkflowButton" class="plain-icon" type="button" aria-label="진행 설정 닫기">×</button></div>
-    <label class="settings-field">대화 방식<select id="workflowFlow"><option value="auto">자동 선택</option><option value="sequential">순차 대화</option><option value="parallel">동시 조사 후 토론</option></select></label>
+    <label class="settings-field">대화 방식<select id="workflowFlow"><option value="auto">자동 선택</option><option value="sequential">순차 대화</option><option value="parallel">동시 조사 후 토론</option><option value="debate">자동 토론 (결론 날 때까지)</option></select></label>
+    <div id="debateFields" hidden><label class="settings-field">최대 라운드<input id="workflowMaxRounds" type="number" min="1" max="10" step="1" value="5"></label></div>
     <label class="settings-field">도구 권한<select id="workflowAccess"><option value="chat">대화만</option><option value="research">웹 검색 및 자료 조사</option><option value="project">프로젝트 파일 · 터미널 · 웹</option></select></label>
     <div id="workspaceFields" hidden><label class="settings-field">프로젝트 폴더<input id="workspaceInput" type="text" maxlength="1024" placeholder="C:\Projects\MyApp" autocomplete="off"></label><p class="workflow-note">신뢰하는 프로젝트만 선택하세요. 파일 변경 충돌 방지를 위해 순차 실행합니다. 공식 CLI 권한 및 샌드박스가 적용되며 추가 승인이 필요한 작업은 실행되지 않을 수 있습니다.</p></div>
     <p id="workflowHint" class="workflow-note">동시 조사 결과가 먼저 도착한 순서로 표시되고, 모두 완료되면 서로 검토합니다.</p>

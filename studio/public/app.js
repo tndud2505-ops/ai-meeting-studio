@@ -16,10 +16,57 @@
   const ROOM_KEY = 'ai-meeting-studio-selected-room-v1';
   const DRAFT_KEY = 'meeting-notes-composer-v2';
   const WORKFLOW_KEY = 'meeting-workflow-v1';
-  let workflow={flow:'auto',access:'research',workspace:''};
+  const APP_SETTINGS_KEY = 'meeting-app-settings-v1';
+  const DEFAULT_APP_SETTINGS = { fontScale: 100, answerStyle: 'brief', showTime: true, autoScroll: true };
+  let appSettings = { ...DEFAULT_APP_SETTINGS };
+  try { appSettings = { ...appSettings, ...JSON.parse(localStorage.getItem(APP_SETTINGS_KEY) || '{}') }; } catch { /* Defaults. */ }
+  let appSettingsTimer = 0;
+  function applyAppSettings() {
+    const scale = Math.min(150, Math.max(85, Number(appSettings.fontScale) || 100));
+    document.documentElement.style.setProperty('--fs', String(scale / 100));
+    document.body.classList.toggle('hide-time', appSettings.showTime === false);
+    try { localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(appSettings)); } catch { /* Cache only. */ }
+  }
+  function syncAppSettingsDialog() {
+    $('fontScaleInput').value = appSettings.fontScale;
+    $('fontScaleValue').textContent = appSettings.fontScale + '%';
+    $('answerStyleSelect').value = appSettings.answerStyle;
+    $('showTimeInput').checked = appSettings.showTime !== false;
+    $('autoScrollInput').checked = appSettings.autoScroll !== false;
+  }
+  function queueAppSettingsSave() {
+    $('appSettingsState').textContent = '저장 중…';
+    clearTimeout(appSettingsTimer);
+    appSettingsTimer = setTimeout(async () => {
+      try {
+        const data = await api('/api/settings', appSettings, 'PUT');
+        appSettings = { ...appSettings, ...data.settings };
+        $('appSettingsError').hidden = true;
+        $('appSettingsState').textContent = '저장됨';
+      } catch (error) {
+        $('appSettingsError').textContent = error.message;
+        $('appSettingsError').hidden = false;
+        $('appSettingsState').textContent = '';
+      }
+    }, 250);
+  }
+  function changeAppSetting(patch) {
+    appSettings = { ...appSettings, ...patch };
+    applyAppSettings();
+    syncAppSettingsDialog();
+    queueAppSettingsSave();
+  }
+  async function loadAppSettings() {
+    const data = await api('/api/settings');
+    appSettings = { ...appSettings, ...data.settings };
+    applyAppSettings();
+    syncAppSettingsDialog();
+  }
+  let workflow={flow:'auto',access:'research',workspace:'',maxRounds:5};
   let approvedWorkspace='';
   try {const stored=JSON.parse(localStorage.getItem(WORKFLOW_KEY)||'null');if(stored)workflow={...workflow,...stored};}catch{}
-  if(!['auto','sequential','parallel'].includes(workflow.flow))workflow.flow='auto';
+  if(!['auto','sequential','parallel','debate'].includes(workflow.flow))workflow.flow='auto';
+  workflow.maxRounds=Math.max(1,Math.min(10,Math.round(Number(workflow.maxRounds))||5));
   if(!['chat','research','project'].includes(workflow.access))workflow.access='research';
   if(typeof workflow.workspace!=='string')workflow.workspace='';
   let savedConfig = false;
@@ -110,7 +157,7 @@
     return {...workflow};
   }
   function renderWorkflow(){
-    $('workflowLabel').textContent=({auto:'자동',sequential:'순차',parallel:'동시'})[workflow.access==='project'?'sequential':workflow.flow]+' · '+({chat:'대화',research:'웹',project:'작업'})[workflow.access];
+    $('workflowLabel').textContent=({auto:'자동',sequential:'순차',parallel:'동시',debate:'토론'})[workflow.access==='project'?'sequential':workflow.flow]+' · '+({chat:'대화',research:'웹',project:'작업'})[workflow.access];
     $('workflowButton').title=workflow.access==='project'?workflow.workspace:'진행 및 도구 설정';
   }
   function syncWorkflowDialog(){
@@ -118,6 +165,9 @@
     $('workspaceFields').hidden=!project;
     $('workflowFlow').disabled=project;
     $('workflowHint').hidden=project;
+    const debate=!project&&$('workflowFlow').value==='debate';
+    $('debateFields').hidden=!debate;
+    $('workflowHint').textContent=debate?'주제를 보내면 AI들이 사용자 개입 없이 토론하고, 모두 합의하면 마지막에 결론을 정리해 끝냅니다. 합의가 안 되면 최대 라운드에서 멈추고 갈린 쟁점을 정리합니다. 도중에 일시정지하거나 끼어들 수 있습니다.':'동시 조사 결과가 먼저 도착한 순서로 표시되고, 모두 완료되면 서로 검토합니다.';
   }
   function effortLabel(value) {
     return ({ default: '기본값', auto: '자동', minimal: '최소', low: '낮음', medium: '보통', high: '높음', xhigh: '매우 높음', max: '최대', ultra: 'Ultra' })[value] || value;
@@ -575,7 +625,7 @@
     return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
   }
   function scrollToLatest(force = false) {
-    if (force || state.autoScroll) requestAnimationFrame(() => { $('messageScroll').scrollTop = $('messageScroll').scrollHeight; });
+    if (force || (state.autoScroll && appSettings.autoScroll !== false)) requestAnimationFrame(() => { $('messageScroll').scrollTop = $('messageScroll').scrollHeight; });
   }
   function timeLabel(value) {
     if (!value || Number.isNaN(new Date(value).getTime())) return '';
@@ -627,7 +677,7 @@
       const content = el('div', 'message-content');
       const nameNode = el('span', 'message-name' + (isUser ? ' sr-only' : ''), message.name || person.displayName);
       if (message.model) nameNode.title = NAMES[message.provider] + ' · ' + message.model + (message.effort ? ' · ' + effortLabel(message.effort) : '');
-      if(message.phase&&!isUser&&!isSystem)nameNode.append(el('span','phase-label',message.phase==='research'?'조사':'검토'));
+      if(message.phase&&!isUser&&!isSystem)nameNode.append(el('span','phase-label',({research:'조사',debate:'토론 '+(message.round||''),'debate-final':'최종 결론'})[message.phase]||'검토'));
       if(message.tools?.length&&!isUser&&!isSystem){const labels={web:'웹',terminal:'터미널',files:'파일'};nameNode.title+=(nameNode.title?' · ':'')+'CLI 도구 이벤트: '+message.tools.map(t=>labels[t]).filter(Boolean).join(', ');}
       const bubbleRow = el('div', 'bubble-row');
       const bubble = el('div', 'message-bubble');
@@ -722,6 +772,10 @@
        } else if (data.type === 'profiles') {
         for (const item of data.profiles || []) if (DEFAULT_PROFILES[item.id]) state.profiles.set(item.id, item);
         refreshProfileViews();
+      } else if (data.type === 'settings' && data.settings) {
+        appSettings = { ...appSettings, ...data.settings };
+        applyAppSettings();
+        if ($('appSettingsDialog').open) syncAppSettingsDialog();
       } else if (data.type === 'room' && data.room?.id === state.room?.id) {
         selectRoom(data.room);
       } else if (data.type === 'delta' && data.roomId === state.room?.id) {
@@ -774,14 +828,24 @@
 
   buildModelBar();
   renderWorkflow();
+  applyAppSettings();
+  $('appSettingsButton').addEventListener('click', () => { syncAppSettingsDialog(); $('appSettingsState').textContent = ''; $('appSettingsError').hidden = true; $('appSettingsDialog').showModal(); });
+  $('closeAppSettingsButton').addEventListener('click', () => $('appSettingsDialog').close());
+  $('doneAppSettingsButton').addEventListener('click', () => $('appSettingsDialog').close());
+  $('fontScaleInput').addEventListener('input', () => changeAppSetting({ fontScale: Number($('fontScaleInput').value) }));
+  $('fontScaleReset').addEventListener('click', () => changeAppSetting({ fontScale: 100 }));
+  $('answerStyleSelect').addEventListener('change', () => changeAppSetting({ answerStyle: $('answerStyleSelect').value }));
+  $('showTimeInput').addEventListener('change', () => changeAppSetting({ showTime: $('showTimeInput').checked }));
+  $('autoScrollInput').addEventListener('change', () => changeAppSetting({ autoScroll: $('autoScrollInput').checked }));
   $('workflowButton').addEventListener('click',()=>{
-    $('workflowFlow').value=workflow.flow;$('workflowAccess').value=workflow.access;$('workspaceInput').value=workflow.workspace;
+    $('workflowFlow').value=workflow.flow;$('workflowAccess').value=workflow.access;$('workspaceInput').value=workflow.workspace;$('workflowMaxRounds').value=workflow.maxRounds;
     syncWorkflowDialog();$('workflowDialog').showModal();
   });
   $('workflowAccess').addEventListener('change',syncWorkflowDialog);
+  $('workflowFlow').addEventListener('change',syncWorkflowDialog);
   $('closeWorkflowButton').addEventListener('click',()=>$('workflowDialog').close());
   $('saveWorkflowButton').addEventListener('click',()=>{
-    const next={flow:$('workflowFlow').value,access:$('workflowAccess').value,workspace:$('workspaceInput').value.trim()};
+    const next={flow:$('workflowFlow').value,access:$('workflowAccess').value,workspace:$('workspaceInput').value.trim(),maxRounds:Math.max(1,Math.min(10,Math.round(Number($('workflowMaxRounds').value))||5))};
     if(next.access==='project'&&!next.workspace){$('workspaceInput').focus();return;}
     if(next.workspace!==workflow.workspace||next.access!==workflow.access)approvedWorkspace='';
     workflow=next;try{localStorage.setItem(WORKFLOW_KEY,JSON.stringify(workflow));}catch{}
@@ -908,7 +972,7 @@
   resizeComposer();
   renderControls();
   registerPwa();
-  Promise.allSettled([refreshStatus(), loadRoles(), loadProfiles()]).then(async () => {
+  Promise.allSettled([refreshStatus(), loadRoles(), loadProfiles(), loadAppSettings()]).then(async () => {
     await restoreRoom();
     openEvents();
   });

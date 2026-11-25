@@ -6,6 +6,7 @@ import { MeetingEngine, publicRoom, exportMarkdown, exportSrt } from './engine.m
 import { getProviders, runProvider, launchLogin, checkProvider } from './providers.mjs';
 import { getRole, getRoles, saveRole } from './roles.mjs';
 import { getProfile, getProfiles, saveProfile } from './profiles.mjs';
+import { loadSettings, saveSettings, currentSettings } from './settings.mjs';
 import { redact } from '../src/redactor.js';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
@@ -15,6 +16,7 @@ const clients=new Set();
 const broadcast=event=>{const line=`data: ${JSON.stringify(event)}\n\n`;for(const res of clients){if(!res.destroyed)res.write(line);else clients.delete(res);}};
 const engine=new MeetingEngine({dataDir:path.join(root,'data','rooms'),workDir:path.join(root,'workdir'),runProvider,getProviders,roleResolver:getRole,profileResolver:getProfile,broadcast});
 await engine.init();
+await loadSettings();
 const checks=new Set();
 let closing=false;
 const headers={
@@ -50,6 +52,12 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='GET'&&route==='/api/status')return json(res,200,{providers:await getProviders({refresh:url.searchParams.get('refresh')==='1'}),serverTime:new Date().toISOString()});
     if(req.method==='GET'&&route==='/api/rooms')return json(res,200,{rooms:engine.list()});
     if(req.method==='GET'&&route==='/api/roles')return json(res,200,{roles:await getRoles()});
+    if(req.method==='GET'&&route==='/api/settings')return json(res,200,{settings:currentSettings()});
+    if(req.method==='PUT'&&route==='/api/settings'){
+      const settings=await saveSettings(await body(req));
+      broadcast({type:'settings',settings});
+      return json(res,200,{settings});
+    }
     if(req.method==='GET'&&route==='/api/profiles')return json(res,200,{profiles:await getProfiles()});
     const profileMatch=route.match(/^\/api\/profiles\/(codex|claude|gemini|user)$/);
     if(req.method==='PUT'&&profileMatch){
@@ -61,7 +69,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='PUT'&&roleMatch){const input=await body(req);return json(res,200,{role:await saveRole(roleMatch[1],input.content)});}
     if(req.method==='POST'&&route==='/api/session/open'){
       const input=await body(req);
-      const room=await engine.create({title:'회의',topic:'함께 논의할 내용',mode:'meeting',rounds:1,turnDelayMs:400,wordLimit:90,userLed:true,participants:input.participants,...(input.workflow?{flow:input.workflow.flow,access:input.workflow.access,workspace:input.workflow.workspace}:{})});
+      const room=await engine.create({title:'회의',topic:'함께 논의할 내용',mode:'meeting',rounds:1,turnDelayMs:400,wordLimit:90,userLed:true,participants:input.participants,...(input.workflow?{flow:input.workflow.flow,access:input.workflow.access,workspace:input.workflow.workspace,maxRounds:input.workflow.maxRounds}:{})});
       return json(res,201,{room:publicRoom(room)});
     }
     if(req.method==='POST'&&route==='/api/session/reset'){

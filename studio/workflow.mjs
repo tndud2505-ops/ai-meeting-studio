@@ -5,13 +5,14 @@ import { randomUUID } from 'node:crypto';
 import { redact } from '../src/redactor.js';
 
 export function normalizeWorkflow(input = {}) {
-  const flow = ['auto','sequential','parallel'].includes(input.flow) ? input.flow : 'sequential';
+  const flow = ['auto','sequential','parallel','debate'].includes(input.flow) ? input.flow : 'sequential';
   const access = ['chat','research','project'].includes(input.access) ? input.access : 'chat';
   const workspace = access === 'project' ? String(input.workspace || '').trim() : '';
   if (access === 'project' && (!workspace || workspace.length > 1024 || !path.isAbsolute(workspace) || /[\u0000-\u001f]/.test(workspace))) {
     throw new Error('프로젝트 작업에는 실제 프로젝트 폴더의 절대 경로가 필요합니다.');
   }
-  return { flow, access, workspace };
+  const maxRounds = Number.isFinite(Number(input.maxRounds)) ? Math.max(1, Math.min(10, Math.round(Number(input.maxRounds)))) : 5;
+  return { flow, access, workspace, maxRounds };
 }
 
 export async function resolveWorkspace(workspace) {
@@ -25,6 +26,7 @@ export async function resolveWorkspace(workspace) {
 
 export function chooseFlow(config, latestMessage = '') {
   if (config.access === 'project') return 'sequential'; // one writer at a time
+  if (config.flow === 'debate') return 'debate';
   if (config.flow !== 'auto') return config.flow === 'parallel' ? 'parallel' : 'sequential';
   return /조사|검색|리서치|시장|비교|경쟁|자료|순위|수익성|플레이스토어|앱스토어|research|search|compare|market|ranking|investigat/i.test(latestMessage) ? 'parallel' : 'sequential';
 }
@@ -47,7 +49,9 @@ export function cycleMembers(room) {
   return room.cycleOrder.map(id=>room.config.participants.find(p=>p.id===id)).filter(Boolean);
 }
 
-export function phaseInstruction(phase) {
+export function phaseInstruction(phase, reason = '') {
+  if (phase === 'debate') return '자동 토론 단계: 억지로 동의하지 말고 실제로 납득했을 때만 합의하세요. 앞 내용을 반복하지 말고 아직 남은 쟁점에 집중하세요. 발언의 맨 마지막 줄에 정확히 [입장: 합의] (현재까지의 안에 동의하며 더 다툴 쟁점이 없음) 또는 [입장: 계속] (해소되지 않은 쟁점이 남음) 중 하나만 적으세요.';
+  if (phase === 'debate-final') return '자동 토론 결론 단계: 토론이 끝났습니다. 새 주장을 꺼내지 말고 지금까지의 토론을 정리해 사용자에게 최종 결론을 전달하세요. 형식은 "결론 한 줄 / 핵심 근거 2~3개 / 남은 쟁점 또는 불확실성 / 추천 다음 행동"이며 5~8문장 이내로 쓰세요. ' + (reason === 'max' ? '최대 라운드에 도달했지만 합의하지 못했습니다. 합의되지 않은 쟁점을 합의된 것처럼 쓰지 말고, 갈린 입장과 추천안을 함께 쓰세요.' : '참가자 모두 합의했습니다.');
   if (phase === 'research') return '독립 조사 단계: 아직 이번 단계의 다른 AI 답변을 받지 않았습니다. 사용자의 최신 요청과 자신의 역할에 따라 독립적으로 조사하고, 구체적인 후보·근거·출처·불확실성을 제시하세요. 확인하지 못한 사실은 추정이라고 표시하세요.';
   if (phase === 'review') return '상호 검토 단계: 이번 독립 조사에서 완료된 모든 AI 답변과 최신 사용자 발언을 읽고, 서로 다른 주장과 근거를 비교하세요. 중요한 오류나 불일치를 지적하고 실용적인 후보를 우선순위로 정리하세요. 이미 말한 내용을 반복하지 마세요.';
   return '';
